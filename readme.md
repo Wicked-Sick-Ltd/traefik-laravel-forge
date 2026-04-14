@@ -1,278 +1,332 @@
-This repository includes an example plugin, `demo`, for you to use as a reference for developing your own plugins.
+# Traefik Laravel Forge Provider Plugin
 
-[![Build Status](https://github.com/traefik/pluginproviderdemo/workflows/Main/badge.svg?branch=master)](https://github.com/traefik/pluginproviderdemo/actions)
+[![Build Status](https://github.com/wickedsick/traefik-laravel-forge/workflows/Main/badge.svg?branch=master)](https://github.com/wickedsick/traefik-laravel-forge/actions)
 
-The existing plugins can be browsed into the [Plugin Catalog](https://plugins.traefik.io).
+A Traefik provider plugin that automatically creates HTTP routers based on sites managed in Laravel Forge. **Configure everything via Forge tags** - no config file changes needed after initial setup!
 
-# Provider Plugin Demo
+## Features
 
-[Traefik](https://traefik.io) plugins are developed using the [Go language](https://golang.org).
+- **🏷️ 100% Tag-Based Configuration**: Configure everything via Forge tags after initial setup
+- **🔄 Automatic Site Discovery**: Discovers sites from Laravel Forge via API v2
+- **🎯 Smart Server Mapping**: Configure servers via tags or config file
+- **🔍 Auto-IP Detection**: Automatically uses private IPs from Forge
+- **🔒 TLS/HTTPS Support**: Automatic certificate management with Let's Encrypt
+- **⚡ Real-time Updates**: Polls Forge API at configurable intervals (default: 30s)
+- **🛡️ Security First**: Only creates routes for sites with "installed" status
+- **📝 Flexible Configuration**: Use tags, config file, or both (tags take priority)
 
-Rather than being pre-compiled and linked, however, plugins are executed on the fly by [Yaegi](https://github.com/traefik/yaegi), an embedded Go interpreter.
+## Use Case
 
-## Usage
+This plugin is ideal when you have:
+- Multiple application servers (e.g., app01, app02, app03) managed by Forge
+- One or more Traefik load balancers (e.g., lb01, lb02) in front of them
+- A need to automatically route traffic based on domain names to the appropriate backend servers
+- Want to manage configuration through Forge UI without editing config files
 
-For a plugin to be active for a given Traefik instance, it must be declared in the static configuration.
+## Quick Start: Tag-Based Setup
 
-Plugins are parsed and loaded exclusively during startup, which allows Traefik to check the integrity of the code and catch errors early on.
-If an error occurs during loading, the plugin is disabled.
+After initial Traefik configuration, manage everything via tags:
 
-For security reasons, it is not possible to start a new plugin or modify an existing one while Traefik is running.
+**1. (Optional) Add server tags only if you need to override IP/port:**
+```
+traefik:lb-host=10.0.1.10
+traefik:lb-port=8080
+```
+Otherwise, the plugin auto-detects the private IP and uses port 80.
 
-Plugin dependencies must be [vendored](https://golang.org/ref/mod#vendoring) for each plugin.
-Vendored packages should be included in the plugin's GitHub repository. ([Go modules](https://blog.golang.org/using-go-modules) are not supported.)
+**2. Control which sites are exposed via site tags:**
+```
+traefik:enabled=true              # Enable a site
+traefik:cert-resolver=letsencrypt # Override cert resolver
+traefik:tls=false                 # Disable TLS
+```
 
-### Configuration
+**3. Done!** Servers are automatically enabled if they have enabled sites. Changes apply on next poll (30s default), no config file edits or restarts needed.
 
-For each plugin, the Traefik static configuration must define the module name (as is usual for Go packages).
+See [TAG_CONFIGURATION.md](TAG_CONFIGURATION.md) for the complete guide.
 
-The following declaration (given here in YAML) defines a plugin:
+## Installation
+
+### Local Mode (Development/Testing)
+
+1. Clone this repository to your local `plugins-local` directory:
+
+```bash
+mkdir -p ./plugins-local/src/github.com/wickedsick
+cd ./plugins-local/src/github.com/wickedsick
+git clone <your-repo-url> traefik-laravel-forge
+```
+
+2. Configure Traefik to use the local plugin:
 
 ```yaml
-# Static configuration
-
-experimental:
-  plugins:
-    example:
-      moduleName: github.com/traefik/pluginproviderdemo
-      version: v0.1.0
-
-providers:
-  plugin:
-    example:
-      pollInterval: 2s
-```
-
-#### Local Mode
-
-Traefik also offers a developer mode that can be used for temporary testing of plugins not hosted on GitHub.
-To use a plugin in local mode, the Traefik static configuration must define the module name (as is usual for Go packages) and a path to a [Go workspace](https://golang.org/doc/gopath_code.html#Workspaces), which can be the local GOPATH or any directory.
-
-The plugins must be placed in `./plugins-local` directory, 
-which should be in the working directory of the process running the Traefik binary.
-The source code of the plugin should be organized as follows:
-
-```
-./plugins-local/
-    └── src
-        └── github.com
-            └── traefik
-                └── pluginproviderdemo
-                    ├── demo.go
-                    ├── demo_test.go
-                    ├── go.mod
-                    ├── go.sum
-                    ├── LICENSE
-                    ├── Makefile
-                    ├── readme.md
-                    └── vendor
-                        ├── github.com
-                        │   └── traefik
-                        │       └── genconf
-                        │           ├── dynamic
-                        │           │   ├── config.go
-                        │           │   ├── http_config.go
-                        │           │   ├── marshaler.go
-                        │           │   ├── middlewares.go
-                        │           │   ├── plugins.go
-                        │           │   ├── tcp_config.go
-                        │           │   ├── tls
-                        │           │   │   ├── certificate.go
-                        │           │   │   └── tls.go
-                        │           │   ├── types
-                        │           │   │   ├── domains.go
-                        │           │   │   └── tls.go
-                        │           │   └── udp_config.go
-                        │           └── LICENSE
-                        └── modules.txt
-```
-
-```yaml
-# Static configuration
-# Local mode
+# traefik.yml (static configuration)
 entryPoints:
   web:
     address: :80
+  websecure:
+    address: :443
 
 log:
   level: DEBUG
 
 experimental:
   localPlugins:
-    example:
-      moduleName: github.com/traefik/pluginproviderdemo
+    forge:
+      moduleName: github.com/wickedsick/traefik-laravel-forge
 
 providers:
   plugin:
-    example:
-      pollInterval: 2s
+    forge:
+      apiToken: "your-forge-api-token"
+      organization: "your-org-slug"
+      pollInterval: "30s"
+      serverMappings:
+        - forgeServerName: "app01"
+          upstreamHost: "10.0.1.10:80"
+          traefik: "lb01"
+        - forgeServerName: "app02"
+          upstreamHost: "10.0.1.11:80"
+          traefik: "lb01"
 ```
 
-(In the above example, the `pluginproviderdemo` plugin will be loaded from the path `./plugins-local/src/github.com/traefik/pluginproviderdemo`.)
+### Production Mode (GitHub)
 
-## Defining a Plugin
-
-A plugin package must define the following exported Go objects:
-
-- A type `type Config struct { ... }`. The struct fields are arbitrary.
-- A function `func CreateConfig() *Config`.
-- A function `New(ctx context.Context, config *Config, name string) (*Provider, error)`.
-
-The provider must follow this interface:
-
-```go
-type PluginProvider interface {
-	Init() error
-	Provide(cfgChan chan<- json.Marshaler) error
-	Stop() error
-}
-```
-
-The Go objects used to build the dynamic configuration are in the following repository: https://github.com/traefik/genconf
-
-Example:
-
-```go
-// Package example a example plugin.
-package example
-
-import (
-	"context"
-	"encoding/json"
-
-	"github.com/traefik/genconf/dynamic"
-	"github.com/traefik/genconf/dynamic/tls"
-)
-
-// Config the plugin configuration.
-type Config struct {
-	// ...
-}
-
-// CreateConfig creates the default plugin configuration.
-func CreateConfig() *Config {
-	return &Config{
-		// ...
-	}
-}
-
-// Provider a plugin.
-type Provider struct {
-	name     string
-    // ...
-}
-
-// New created a new plugin.
-func New(ctx context.Context, config *Config, name string) (*Provider, error) {
-	// ...
-	return &Provider{
-		// ...
-	}, nil
-}
-
-// Init the provider.
-func (p *Provider) Init() error {
-	// ...
-	return nil
-}
-
-// Provide creates and send dynamic configuration.
-func (p *Provider) Provide(cfgChan chan<- json.Marshaler) error {
-	// ...
-	cfgChan <- cfg
-	// ...
-	return nil
-}
-
-// Stop to stop the provider and the related go routines.
-func (p *Provider) Stop() error {
-	// ...
-	return nil
-}
-```
-
-## Logs
-
-Currently, the only way to send logs to Traefik is to use `os.Stdout.WriteString("...")` or `os.Stderr.WriteString("...")`.
-
-In the future, we will try to provide something better and based on levels.
-
-## Plugins Catalog
-
-Traefik plugins are stored and hosted as public GitHub repositories.
-
-Once a day, the Plugins Catalog online service polls Github to find plugins and add them to its catalog.
-
-### Prerequisites
-
-To be recognized by Plugins Catalog, your repository must meet the following criteria:
-
-- The `traefik-plugin` topic must be set.
-- The `.traefik.yml` manifest must exist, and be filled with valid contents.
-
-If your repository fails to meet either of these prerequisites, Plugins Catalog will not see it.
-
-### Manifest
-
-A manifest is also mandatory, and it should be named `.traefik.yml` and stored at the root of your project.
-
-This YAML file provides Plugins Catalog with information about your plugin, such as a description, a full name, and so on.
-
-Here is an example of a typical `.traefik.yml`file:
+Once published to GitHub with the `traefik-plugin` topic:
 
 ```yaml
-# The name of your plugin as displayed in the Plugins Catalog web UI.
-displayName: Name of your plugin
+# traefik.yml (static configuration)
+experimental:
+  plugins:
+    forge:
+      moduleName: github.com/wickedsick/traefik-laravel-forge
+      version: v1.0.0
 
-type: provider
-
-# The import path of your plugin.
-import: github.com/username/my-plugin
-
-# A brief description of what your plugin is doing.
-summary: Description of what my plugin is doing
-
-# Medias associated to the plugin (optional)
-iconPath: foo/icon.png
-bannerPath: foo/banner.png
-
-# Configuration data for your plugin.
-# This is mandatory,
-# and Plugins Catalog will try to execute the plugin with the data you provide as part of its startup validity tests.
-testData:
-  Headers:
-    Foo: Bar
+providers:
+  plugin:
+    forge:
+      apiToken: "your-forge-api-token"
+      organization: "your-org-slug"
+      pollInterval: "30s"
+      serverMappings:
+        - forgeServerName: "app01"
+          upstreamHost: "10.0.1.10:80"
+          traefik: "lb01"
 ```
 
-Properties include:
+## Configuration
 
-- `displayName` (required): The name of your plugin as displayed in the Plugins Catalog web UI.
-- `type` (required): the type of the plugin (i.e. `provider`).
-- `import` (required): The import path of your plugin.
-- `summary` (required): A brief description of what your plugin is doing.
-- `testData` (required): Configuration data for your plugin. This is mandatory, and Plugins Catalog will try to execute the plugin with the data you provide as part of its startup validity tests.
-- `iconPath` (optional): A local path in the repository to the icon of the project.
-- `bannerPath` (optional): A local path in the repository to the image that will be used when you will share your plugin page in social medias.
+### Required Parameters
 
-There should also be a `go.mod` file at the root of your project.Plugins Catalog will use this file to validate the name of the project.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `apiToken` | string | Your Laravel Forge API token (get it from forge.laravel.com/user/profile#/api) |
+| `organization` | string | Your Forge organization slug (found in URL: forge.laravel.com/orgs/{organization}) |
+| `defaultCertResolver` | string | Default certificate resolver for automatic TLS (optional) |
+| `defaultSitesEnabled` | bool | Whether sites are enabled by default (default: `true`). Set to `false` for opt-in mode. |
+| `httpRedirect` | bool | Create HTTP->HTTPS redirect routers (default: `false`) |
+| `redirectMiddleware` | string | Name of middleware to use for HTTP redirects (e.g., `"https-redirect"`) |
+| `serverMappings` | array | List of server mappings (see below) |
 
-### Tags and Dependencies
+### Optional Parameters
 
-Plugins Catalog gets your sources from a Go module proxy, so your plugins need to be versioned with a git tag.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pollInterval` | string | "30s" | How often to poll the Forge API for changes (minimum: 10s) |
 
-Last but not least, if your plugin has Go package dependencies, you need to vendor them and add them to your GitHub repository.
+### Server Mappings
 
-If something goes wrong with the integration of your plugin, Plugins Catalog will create an issue inside your Github repository and will stop trying to add your repo until you close the issue.
+Each server mapping defines how a Forge server should be exposed:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `forgeServerName` | string | The name of the server in Laravel Forge (e.g., "app01") |
+| `upstreamHost` | string | (Optional) The upstream IP where the server can be reached. If omitted, auto-detected from Forge API |
+| `upstreamPort` | int | (Optional) The upstream port to use (default: 80) |
+| `traefik` | string | Identifier for which Traefik instance should handle this (informational) |
+
+## How It Works
+
+1. **Polling**: The plugin polls the Forge API at the specified interval
+2. **Server Discovery**: It fetches all servers from your Forge account
+3. **Mapping**: For each server, it checks if there's a corresponding `serverMapping`
+4. **Site Discovery**: For mapped servers, it fetches all sites
+5. **Route Creation**: For each site with status "installed", it creates:
+   - An HTTP router with a Host rule matching the site's domain
+   - A service pointing to the `upstreamHost` from the mapping
+   - PassHostHeader is enabled so the backend receives the original Host header
+
+### Example Flow
+
+Given this configuration:
+```yaml
+serverMappings:
+  - forgeServerName: "app01"
+    upstreamHost: "10.0.1.10:80"
+    traefik: "lb01"
+```
+
+If Forge server "app01" has sites:
+- example.com (status: installed)
+- test.com (status: installing)
+
+The plugin will create:
+- Router for `example.com` → `http://10.0.1.10:80` (with Host header preserved)
+- No router for `test.com` (status not "installed")
+
+## Security Considerations
+
+1. **API Token**: Store your Forge API token securely. Consider using environment variables or secrets management.
+2. **Unmapped Servers**: Servers without explicit mappings are ignored, preventing unintended exposure.
+3. **Network Access**: Ensure your Traefik instance can reach the internal IPs specified in `upstreamHost`.
+4. **HTTPS**: This plugin creates HTTP routers. Use Traefik's built-in TLS features for HTTPS termination.
+
+## Advanced Features
+
+### Auto-Detection of Server IPs
+
+The plugin can automatically detect server IP addresses from Forge, preferring private IPs for internal networks:
+
+```yaml
+serverMappings:
+  # Automatically uses private_ip_address from Forge
+  - forgeServerName: "app01"
+    upstreamPort: 80
+```
+
+See [FEATURES.md](FEATURES.md#auto-detection-of-server-ips) for details.
+
+### TLS Certificate Management
+
+Configure automatic HTTPS with Let's Encrypt:
+
+```yaml
+providers:
+  plugin:
+    forge:
+      defaultCertResolver: "letsencrypt"
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: your-email@example.com
+      storage: /acme.json
+      httpChallenge:
+        entryPoint: web
+```
+
+All sites will automatically get TLS enabled with the specified resolver.
+
+### Per-Site Configuration via Tags
+
+Configure individual sites using tags in Forge (no config file changes needed):
+
+| Tag | Effect |
+|-----|--------|
+| `traefik:enabled=true/false` | Enable/disable site |
+| `traefik:port=8080` | Override backend port |
+| `traefik:cert-resolver=letsencrypt` | Use specific cert resolver |
+| `traefik:tls=true/false` | Enable/disable TLS |
+| `traefik:http-redirect=true/false` | Enable/disable HTTP->HTTPS redirect |
+| `traefik:entrypoints=websecure` | Custom entry points |
+
+**Example**: Add `traefik:cert-resolver=letsencrypt-staging` tag to a site in Forge to use staging certificates for testing.
+
+See [FEATURES.md](FEATURES.md) for comprehensive documentation on all advanced features.
+
+## Logging
+
+The plugin logs to stdout and stderr:
+- Server and site discovery information
+- IP auto-detection results
+- TLS configuration decisions
+- Tag parsing results
+- Mapping decisions
+- Errors from the Forge API
+
+Enable Traefik's DEBUG log level to see detailed plugin output:
+```yaml
+log:
+  level: DEBUG
+```
 
 ## Troubleshooting
 
-If Plugins Catalog fails to recognize your plugin, you will need to make one or more changes to your GitHub repository.
+### No routes are being created
 
-In order for your plugin to be successfully imported by Plugins Catalog, consult this checklist:
+1. Check that your API token is valid
+2. Verify server names match exactly (case-sensitive)
+3. Ensure sites have status "installed"
+4. Check Traefik logs for API errors
 
-- The `traefik-plugin` topic must be set on your repository.
-- There must be a `.traefik.yml` file at the root of your project describing your plugin, and it must have a valid `testData` property for testing purposes.
-- There must be a valid `go.mod` file at the root of your project.
-- Your plugin must be versioned with a git tag.
-- If you have package dependencies, they must be vendored and added to your GitHub repository.
+### Routes created but traffic not flowing
 
+1. Verify the `upstreamHost` IPs are reachable from Traefik
+2. Check that the backend servers are listening on the specified ports
+3. Ensure DNS is resolving the domain names to your Traefik instance
+
+### Poll interval too short
+
+**Error:** "poll interval must be at least 10s"
+
+**Solution:** Set `pollInterval` to at least "10s". The minimum is enforced to:
+- Avoid overwhelming the Forge API
+- Prevent rate limiting issues
+- Reduce unnecessary load on both systems
+
+Recommended values:
+- Development: "10s" (minimum)
+- Production: "30s" to "60s"
+
+### API rate limiting
+
+If you're polling very frequently with many servers/sites, you may hit Forge's rate limits. Increase `pollInterval` if this occurs.
+
+## Development
+
+### Building
+
+```bash
+make vendor
+```
+
+### Testing
+
+```bash
+make test
+```
+
+### Linting
+
+```bash
+make lint
+```
+
+## Publishing to Traefik Plugin Catalog
+
+To publish this plugin to the official Traefik Plugin Catalog:
+
+1. Ensure the repository has the `traefik-plugin` topic
+2. Ensure `.traefik.yml` is present and valid
+3. Tag a release: `git tag v1.0.0 && git push --tags`
+4. Wait for the Plugin Catalog to discover your plugin (runs daily)
+
+## License
+
+See LICENSE file.
+
+## Contributing
+
+Contributions welcome! Please open an issue or pull request.
+
+## API Reference
+
+This plugin uses the Laravel Forge API v2:
+- Base URL: `https://forge.laravel.com/api`
+- Authentication: Bearer token (OAuth2)
+- Format: JSON:API specification
+- Endpoints used:
+  - `GET /orgs/{organization}/servers` - List all servers in organization
+  - `GET /orgs/{organization}/servers/{serverId}/sites` - List sites on a server
+
+The v2 API uses the JSON:API specification for structured, consistent responses with support for pagination, filtering, sorting, and including related resources.
