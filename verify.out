@@ -1,0 +1,19 @@
+Fetching configuration from Forge API...
+------------------------------------------------------------
+Fetched 1 servers from Forge
+No explicit configuration for server 'php01', will check for enabled sites
+Found 3 sites on server 'php01'
+Auto-detected private IP for server 'php01': 192.168.5.101
+Processing server 'php01' (ID: 990530) -> http://192.168.5.101:0 (auto-detected, 3 enabled sites)
+Created router for site 'bounceiq.com' -> http://192.168.5.101:0 (no TLS)
+Created router for site 'perfectcellar.net' -> http://192.168.5.101:0 (no TLS)
+Created router for site 'print-inventory-qxt6zaua.on-forge.com' -> http://192.168.5.101:0 (no TLS)
+------------------------------------------------------------
+
+Generated 3 routers, 3 services
+
+ROUTER                                             HOST RULE                 ENTRY POINTS    SERVICE -> BACKEND  
+-------------------------------------------------------------------------------------------------------------------
+forge-php01-2939215                                bounceiq.com              web             http://192.168.5.101:0
+forge-php01-2941783                                perfectcellar.net         web             http://192.168.5.101:0
+forge-php01-3076221                                print-inventory-qxt6zaua.on-forge.com web             http://192.168.5.101:0

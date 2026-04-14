@@ -45,11 +45,25 @@ func CreateConfig() *Config {
 	}
 }
 
+// ForgeTagRef is a JSON:API relationship reference to a tag resource.
+type ForgeTagRef struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// ForgeRelationships holds the relationships block returned by the API.
+type ForgeRelationships struct {
+	Tags struct {
+		Data []ForgeTagRef `json:"data"`
+	} `json:"tags"`
+}
+
 // ForgeServer represents a server from the Forge API v2 (JSON:API format).
 type ForgeServer struct {
-	ID         string                 `json:"id"`
-	Type       string                 `json:"type"`
-	Attributes ForgeServerAttributes  `json:"attributes"`
+	ID            string               `json:"id"`
+	Type          string               `json:"type"`
+	Attributes    ForgeServerAttributes `json:"attributes"`
+	Relationships ForgeRelationships   `json:"relationships"`
 }
 
 // ForgeServerAttributes contains the server attributes.
@@ -59,14 +73,15 @@ type ForgeServerAttributes struct {
 	PrivateIPAddress string   `json:"private_ip_address"`
 	Provider         string   `json:"provider"`
 	Region           string   `json:"region"`
-	Tags             []string `json:"tags,omitempty"` // Server tags for configuration
+	Tags             []string `json:"-"` // Populated from relationships+included after decode
 }
 
 // ForgeSite represents a site from the Forge API v2 (JSON:API format).
 type ForgeSite struct {
-	ID         string              `json:"id"`
-	Type       string              `json:"type"`
-	Attributes ForgeSiteAttributes `json:"attributes"`
+	ID            string             `json:"id"`
+	Type          string             `json:"type"`
+	Attributes    ForgeSiteAttributes `json:"attributes"`
+	Relationships ForgeRelationships `json:"relationships"`
 }
 
 // ForgeSiteAttributes contains the site attributes.
@@ -74,35 +89,23 @@ type ForgeSiteAttributes struct {
 	Name   string   `json:"name"`
 	Status string   `json:"status"`
 	URL    string   `json:"url"`
-	Tags   []string `json:"tags,omitempty"` // Site tags for configuration
-}
-
-// ForgeTag represents a tag from the Forge API.
-type ForgeTag struct {
-	ID         string           `json:"id"`
-	Type       string           `json:"type"`
-	Attributes ForgeTagAttributes `json:"attributes"`
-}
-
-// ForgeTagAttributes contains tag attributes.
-type ForgeTagAttributes struct {
-	Name string `json:"name"`
+	Tags   []string `json:"-"` // Populated from relationships+included after decode
 }
 
 // ForgeServersResponse represents the JSON:API response from listing servers.
 type ForgeServersResponse struct {
-	Data     []ForgeServer           `json:"data"`
-	Included []interface{}           `json:"included,omitempty"` // Can include tags
-	Links    map[string]interface{}  `json:"links"`
-	Meta     map[string]interface{}  `json:"meta"`
+	Data     []ForgeServer `json:"data"`
+	Included []interface{} `json:"included,omitempty"`
+	Links    interface{}   `json:"links"`
+	Meta     interface{}   `json:"meta"`
 }
 
 // ForgeSitesResponse represents the JSON:API response from listing sites.
 type ForgeSitesResponse struct {
-	Data     []ForgeSite            `json:"data"`
-	Included []interface{}          `json:"included,omitempty"` // Can include tags and other relations
-	Links    map[string]interface{} `json:"links"`
-	Meta     map[string]interface{} `json:"meta"`
+	Data     []ForgeSite   `json:"data"`
+	Included []interface{} `json:"included,omitempty"`
+	Links    interface{}   `json:"links"`
+	Meta     interface{}   `json:"meta"`
 }
 
 // Provider a Laravel Forge provider plugin.
@@ -215,11 +218,15 @@ func (p *Provider) sendConfiguration(cfgChan chan<- json.Marshaler) {
 
 // fetchForgeServers retrieves all servers from the Forge API v2.
 func (p *Provider) fetchForgeServers() ([]ForgeServer, error) {
-	// Include tags in the response
+	servers, _, err := p.fetchForgeServersRaw()
+	return servers, err
+}
+
+func (p *Provider) fetchForgeServersRaw() ([]ForgeServer, json.RawMessage, error) {
 	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers?include=tags", p.organization)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+p.apiToken)
@@ -227,58 +234,53 @@ func (p *Provider) fetchForgeServers() ([]ForgeServer, error) {
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch servers: %w", err)
+		return nil, nil, fmt.Errorf("failed to fetch servers: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read servers response: %w", err)
 	}
 
 	var serversResp ForgeServersResponse
-	if err := json.NewDecoder(resp.Body).Decode(&serversResp); err != nil {
-		return nil, fmt.Errorf("failed to decode servers response: %w", err)
+	if err := json.Unmarshal(raw, &serversResp); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode servers response: %w", err)
 	}
 
-	// Parse included tags and map them to servers (similar to sites)
 	p.mapTagsToServers(&serversResp)
 
-	return serversResp.Data, nil
+	return serversResp.Data, json.RawMessage(raw), nil
 }
 
-// mapTagsToServers extracts tag names from included resources and adds them to servers.
+// mapTagsToServers resolves tag names from the included array and populates each server's Tags slice.
 func (p *Provider) mapTagsToServers(resp *ForgeServersResponse) {
-	if resp.Included == nil {
-		return
-	}
-
-	// Build a map of tag IDs to tag names
-	tagMap := make(map[string]string)
-	for _, included := range resp.Included {
-		if incMap, ok := included.(map[string]interface{}); ok {
-			if typeVal, ok := incMap["type"].(string); ok && typeVal == "tag" {
-				if idVal, ok := incMap["id"].(string); ok {
-					if attrs, ok := incMap["attributes"].(map[string]interface{}); ok {
-						if name, ok := attrs["name"].(string); ok {
-							tagMap[idVal] = name
-						}
-					}
-				}
+	tagMap := buildTagMap(resp.Included)
+	for i := range resp.Data {
+		for _, ref := range resp.Data[i].Relationships.Tags.Data {
+			if name, ok := tagMap[ref.ID]; ok {
+				resp.Data[i].Attributes.Tags = append(resp.Data[i].Attributes.Tags, name)
 			}
 		}
 	}
-
-	// Tags in attributes are already strings, not IDs (simplified for now)
 }
 
 // fetchForgeSites retrieves all sites for a specific server from the Forge API v2.
 func (p *Provider) fetchForgeSites(serverID string) ([]ForgeSite, error) {
-	// Include tags in the response
+	sites, _, err := p.fetchForgeSitesRaw(serverID)
+	return sites, err
+}
+
+func (p *Provider) fetchForgeSitesRaw(serverID string) ([]ForgeSite, json.RawMessage, error) {
 	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites?include=tags", p.organization, serverID)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+p.apiToken)
@@ -286,50 +288,61 @@ func (p *Provider) fetchForgeSites(serverID string) ([]ForgeSite, error) {
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch sites: %w", err)
+		return nil, nil, fmt.Errorf("failed to fetch sites: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read sites response: %w", err)
 	}
 
 	var sitesResp ForgeSitesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sitesResp); err != nil {
-		return nil, fmt.Errorf("failed to decode sites response: %w", err)
+	if err := json.Unmarshal(raw, &sitesResp); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode sites response: %w", err)
 	}
 
-	// Parse included tags and map them to sites
 	p.mapTagsToSites(&sitesResp)
 
-	return sitesResp.Data, nil
+	return sitesResp.Data, json.RawMessage(raw), nil
 }
 
-// mapTagsToSites extracts tag names from included resources and adds them to sites.
+// mapTagsToSites resolves tag names from the included array and populates each site's Tags slice.
 func (p *Provider) mapTagsToSites(resp *ForgeSitesResponse) {
-	if resp.Included == nil {
-		return
-	}
-
-	// Build a map of tag IDs to tag names
-	tagMap := make(map[string]string)
-	for _, included := range resp.Included {
-		if incMap, ok := included.(map[string]interface{}); ok {
-			if typeVal, ok := incMap["type"].(string); ok && typeVal == "tag" {
-				if idVal, ok := incMap["id"].(string); ok {
-					if attrs, ok := incMap["attributes"].(map[string]interface{}); ok {
-						if name, ok := attrs["name"].(string); ok {
-							tagMap[idVal] = name
-						}
-					}
-				}
+	tagMap := buildTagMap(resp.Included)
+	for i := range resp.Data {
+		for _, ref := range resp.Data[i].Relationships.Tags.Data {
+			if name, ok := tagMap[ref.ID]; ok {
+				resp.Data[i].Attributes.Tags = append(resp.Data[i].Attributes.Tags, name)
 			}
 		}
 	}
+}
 
-	// This is a simplified approach - in reality we'd need to parse the relationships
-	// For now, tags in the attributes are strings, not IDs
+// buildTagMap builds a map of tag ID -> tag name from a JSON:API included array.
+func buildTagMap(included []interface{}) map[string]string {
+	tagMap := make(map[string]string)
+	for _, item := range included {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["type"] != "tags" {
+			continue
+		}
+		id, _ := m["id"].(string)
+		attrs, _ := m["attributes"].(map[string]interface{})
+		name, _ := attrs["name"].(string)
+		if id != "" && name != "" {
+			tagMap[id] = name
+		}
+	}
+	return tagMap
 }
 
 // ParseTagConfig parses a tag for configuration directives.
@@ -454,7 +467,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		// Determine configuration source: tags > mapping > none
 		// If no configuration exists, server will be processed but might have no enabled sites
 		var upstreamHost string
-		var upstreamPort int
+		upstreamPort := 80 // default
 		var configSource string
 		var hasConfig bool
 
@@ -558,6 +571,8 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			sitePort := upstreamPort              // Default to server port
 			httpRedirect := p.httpRedirect        // Start with global setting
 			var entryPoints []string
+			hostOverride := ""   // traefik:host= overrides the Forge site name in the Host() rule
+			var hostAliases []string // traefik:aliases= adds extra hosts to the Host() rule
 
 			for _, tag := range site.Attributes.Tags {
 				key, value, isTraefikTag := ParseTagConfig(tag)
@@ -589,6 +604,16 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 						entryPoints[i] = strings.TrimSpace(entryPoints[i])
 					}
 					os.Stdout.WriteString(fmt.Sprintf("Site '%s' using custom entry points: %v\n", site.Attributes.Name, entryPoints))
+				case "host":
+					hostOverride = value
+					os.Stdout.WriteString(fmt.Sprintf("Site '%s' host overridden to '%s' via tag\n", site.Attributes.Name, value))
+				case "aliases":
+					for _, a := range strings.Split(value, ",") {
+						if a = strings.TrimSpace(a); a != "" {
+							hostAliases = append(hostAliases, a)
+						}
+					}
+					os.Stdout.WriteString(fmt.Sprintf("Site '%s' aliases: %v\n", site.Attributes.Name, hostAliases))
 				}
 			}
 
@@ -611,11 +636,21 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				}
 			}
 
+			// Build Host() rule — tag overrides take priority over the Forge site name
+			primaryHost := site.Attributes.Name
+			if hostOverride != "" {
+				primaryHost = hostOverride
+			}
+			hostRule := fmt.Sprintf("Host(`%s`)", primaryHost)
+			for _, alias := range hostAliases {
+				hostRule += fmt.Sprintf(" || Host(`%s`)", alias)
+			}
+
 			// Create the HTTPS/main router
 			router := &dynamic.Router{
 				EntryPoints: entryPoints,
 				Service:     serviceName,
-				Rule:        fmt.Sprintf("Host(`%s`)", site.Attributes.Name),
+				Rule:        hostRule,
 			}
 
 			// Add TLS configuration if enabled
@@ -634,7 +669,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				httpRouter := &dynamic.Router{
 					EntryPoints: []string{"web"},
 					Service:     serviceName,
-					Rule:        fmt.Sprintf("Host(`%s`)", site.Attributes.Name),
+					Rule:        hostRule,
 				}
 
 				// Add redirect middleware if specified
@@ -680,6 +715,43 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 // Useful for verification and testing without running Traefik.
 func (p *Provider) GenerateConfiguration() (*dynamic.Configuration, error) {
 	return p.generateConfiguration()
+}
+
+// DumpRaw fetches raw JSON from the Forge API for all servers and their sites.
+// Useful for inspecting the actual API response shape during development.
+func (p *Provider) DumpRaw() ([]byte, error) {
+	servers, rawServers, err := p.fetchForgeServersRaw()
+	if err != nil {
+		return nil, err
+	}
+
+	type sitesDump struct {
+		ServerID   string          `json:"server_id"`
+		ServerName string          `json:"server_name"`
+		Raw        json.RawMessage `json:"raw"`
+	}
+	siteDumps := []sitesDump{}
+
+	for _, server := range servers {
+		_, raw, err := p.fetchForgeSitesRaw(server.ID)
+		if err != nil {
+			return nil, fmt.Errorf("sites for server %s: %w", server.Attributes.Name, err)
+		}
+		siteDumps = append(siteDumps, sitesDump{
+			ServerID:   server.ID,
+			ServerName: server.Attributes.Name,
+			Raw:        raw,
+		})
+	}
+
+	out := struct {
+		Servers json.RawMessage `json:"servers"`
+		Sites   []sitesDump     `json:"sites"`
+	}{
+		Servers: rawServers,
+		Sites:   siteDumps,
+	}
+	return json.MarshalIndent(out, "", "  ")
 }
 
 func boolPtr(v bool) *bool {

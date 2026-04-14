@@ -29,6 +29,7 @@ func main() {
 	redirectMiddleware := flag.String("redirect-middleware", "", "Name of redirect middleware to use with http-redirect")
 	comparePath := flag.String("compare", "", "Path to existing Traefik dynamic config file (.yml) to compare against")
 	jsonOut := flag.Bool("json", false, "Output generated config as JSON")
+	dumpRaw := flag.Bool("dump", false, "Dump raw Forge API responses as JSON (useful for inspecting available fields)")
 	flag.Parse()
 
 	if *token == "" {
@@ -52,6 +53,16 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating provider: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *dumpRaw {
+		raw, err := provider.DumpRaw()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+		return
 	}
 
 	fmt.Println("Fetching configuration from Forge API...")
