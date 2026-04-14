@@ -163,7 +163,7 @@ type Provider struct {
 }
 
 // New creates a new Provider plugin.
-func New(ctx context.Context, config *Config, name string) (*Provider, error) {
+func New(_ context.Context, config *Config, name string) (*Provider, error) {
 	if config.APIToken == "" {
 		return nil, fmt.Errorf("apiToken is required")
 	}
@@ -247,7 +247,7 @@ func (p *Provider) loadConfiguration(ctx context.Context, cfgChan chan<- json.Ma
 func (p *Provider) sendConfiguration(cfgChan chan<- json.Marshaler) {
 	configuration, err := p.generateConfiguration()
 	if err != nil {
-		os.Stderr.WriteString(fmt.Sprintf("Error generating configuration: %v\n", err))
+		fmt.Fprintf(os.Stderr, "Error generating configuration: %v\n", err)
 		return
 	}
 
@@ -262,7 +262,7 @@ func (p *Provider) fetchForgeServers() ([]ForgeServer, error) {
 
 func (p *Provider) fetchForgeServersRaw() ([]ForgeServer, json.RawMessage, error) {
 	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers?include=tags", p.organization)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -274,7 +274,7 @@ func (p *Provider) fetchForgeServersRaw() ([]ForgeServer, json.RawMessage, error
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch servers: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -316,7 +316,7 @@ func (p *Provider) fetchForgeSites(serverID string) ([]ForgeSite, error) {
 
 func (p *Provider) fetchForgeSitesRaw(serverID string) ([]ForgeSite, json.RawMessage, error) {
 	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites?include=tags", p.organization, serverID)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -328,7 +328,7 @@ func (p *Provider) fetchForgeSitesRaw(serverID string) ([]ForgeSite, json.RawMes
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch sites: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -466,8 +466,9 @@ func ParseServerTags(tags []string) ServerConfig {
 		case "upstream-host", "upstreamhost":
 			cfg.UpstreamHost = value
 		case "upstream-port", "upstreamport":
-			if port, err := fmt.Sscanf(value, "%d", &cfg.UpstreamPort); err == nil && port == 1 {
-				// Successfully parsed port
+			var port int
+			if n, err := fmt.Sscanf(value, "%d", &port); err == nil && n == 1 {
+				cfg.UpstreamPort = port
 			}
 		case "traefik", "traefik-id":
 			cfg.TraefikID = value
@@ -475,8 +476,9 @@ func ParseServerTags(tags []string) ServerConfig {
 		case "lb-host", "loadbalancer-host":
 			cfg.UpstreamHost = value
 		case "lb-port", "loadbalancer-port":
-			if port, err := fmt.Sscanf(value, "%d", &cfg.UpstreamPort); err == nil && port == 1 {
-				// Successfully parsed port
+			var port int
+			if n, err := fmt.Sscanf(value, "%d", &port); err == nil && n == 1 {
+				cfg.UpstreamPort = port
 			}
 		}
 	}
@@ -534,7 +536,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		return nil, fmt.Errorf("failed to fetch servers: %w", err)
 	}
 
-	os.Stdout.WriteString(fmt.Sprintf("Fetched %d servers from Forge\n", len(servers)))
+	fmt.Printf("Fetched %d servers from Forge\n", len(servers))
 
 	// Process each server and its sites
 	for _, server := range servers {
@@ -577,17 +579,17 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		// If no explicit config, we can still process if sites are explicitly enabled
 		// This allows for "traefik:enabled=true" on a site to pull in the server automatically
 		if !hasConfig {
-			os.Stdout.WriteString(fmt.Sprintf("No explicit configuration for server '%s', will check for enabled sites\n", server.Attributes.Name))
+			fmt.Printf("No explicit configuration for server '%s', will check for enabled sites\n", server.Attributes.Name)
 		}
 
 		// Fetch sites for this server first to see if any are enabled
 		sites, err := p.fetchForgeSites(server.ID)
 		if err != nil {
-			os.Stderr.WriteString(fmt.Sprintf("Failed to fetch sites for server %s: %v\n", server.Attributes.Name, err))
+			fmt.Fprintf(os.Stderr, "Failed to fetch sites for server %s: %v\n", server.Attributes.Name, err)
 			continue
 		}
 
-		os.Stdout.WriteString(fmt.Sprintf("Found %d sites on server '%s'\n", len(sites), server.Attributes.Name))
+		fmt.Printf("Found %d sites on server '%s'\n", len(sites), server.Attributes.Name)
 
 		// Count how many sites will actually be processed
 		enabledSitesCount := 0
@@ -611,7 +613,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 
 		// Skip server if no enabled sites
 		if enabledSitesCount == 0 {
-			os.Stdout.WriteString(fmt.Sprintf("Server '%s' has no enabled sites, skipping\n", server.Attributes.Name))
+			fmt.Printf("Server '%s' has no enabled sites, skipping\n", server.Attributes.Name)
 			continue
 		}
 
@@ -619,14 +621,15 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		// Auto-detect IP if not explicitly set
 		if upstreamHost == "" {
 			// Auto-detect from Forge: prefer private IP, fallback to public IP
-			if server.Attributes.PrivateIPAddress != "" {
+			switch {
+			case server.Attributes.PrivateIPAddress != "":
 				upstreamHost = server.Attributes.PrivateIPAddress
-				os.Stdout.WriteString(fmt.Sprintf("Auto-detected private IP for server '%s': %s\n", server.Attributes.Name, upstreamHost))
-			} else if server.Attributes.IPAddress != "" {
+				fmt.Printf("Auto-detected private IP for server '%s': %s\n", server.Attributes.Name, upstreamHost)
+			case server.Attributes.IPAddress != "":
 				upstreamHost = server.Attributes.IPAddress
-				os.Stdout.WriteString(fmt.Sprintf("Using public IP for server '%s': %s\n", server.Attributes.Name, upstreamHost))
-			} else {
-				os.Stderr.WriteString(fmt.Sprintf("No IP address found for server '%s' (has %d enabled sites), skipping\n", server.Attributes.Name, enabledSitesCount))
+				fmt.Printf("Using public IP for server '%s': %s\n", server.Attributes.Name, upstreamHost)
+			default:
+				fmt.Fprintf(os.Stderr, "No IP address found for server '%s' (has %d enabled sites), skipping\n", server.Attributes.Name, enabledSitesCount)
 				continue
 			}
 		}
@@ -634,16 +637,16 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		backendURL := fmt.Sprintf("http://%s:%d", upstreamHost, upstreamPort)
 
 		if hasConfig {
-			os.Stdout.WriteString(fmt.Sprintf("Processing server '%s' (ID: %s) -> %s (via %s, %d enabled sites)\n", server.Attributes.Name, server.ID, backendURL, configSource, enabledSitesCount))
+			fmt.Printf("Processing server '%s' (ID: %s) -> %s (via %s, %d enabled sites)\n", server.Attributes.Name, server.ID, backendURL, configSource, enabledSitesCount)
 		} else {
-			os.Stdout.WriteString(fmt.Sprintf("Processing server '%s' (ID: %s) -> %s (auto-detected, %d enabled sites)\n", server.Attributes.Name, server.ID, backendURL, enabledSitesCount))
+			fmt.Printf("Processing server '%s' (ID: %s) -> %s (auto-detected, %d enabled sites)\n", server.Attributes.Name, server.ID, backendURL, enabledSitesCount)
 		}
 
 		// Create router and service for each site
 		for _, site := range sites {
 			// Skip sites that aren't installed yet
 			if site.Attributes.Status != "installed" {
-				os.Stdout.WriteString(fmt.Sprintf("Site '%s' status is '%s', skipping\n", site.Attributes.Name, site.Attributes.Status))
+				fmt.Printf("Site '%s' status is '%s', skipping\n", site.Attributes.Name, site.Attributes.Status)
 				continue
 			}
 
@@ -670,37 +673,37 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				switch key {
 				case "enabled":
 					siteEnabled = value == "true"
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' explicitly %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[siteEnabled]))
+					fmt.Printf("Site '%s' explicitly %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[siteEnabled])
 				case "cert-resolver", "certresolver":
 					certResolver = value
 					enableTLS = true
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' using cert resolver from tag: %s\n", site.Attributes.Name, value))
+					fmt.Printf("Site '%s' using cert resolver from tag: %s\n", site.Attributes.Name, value)
 				case "tls":
 					enableTLS = value == "true"
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' TLS %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[enableTLS]))
+					fmt.Printf("Site '%s' TLS %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[enableTLS])
 				case "port":
 					if n, err := fmt.Sscanf(value, "%d", &sitePort); err == nil && n == 1 {
-						os.Stdout.WriteString(fmt.Sprintf("Site '%s' using port %d from tag\n", site.Attributes.Name, sitePort))
+						fmt.Printf("Site '%s' using port %d from tag\n", site.Attributes.Name, sitePort)
 					}
 				case "http-redirect", "redirect":
 					httpRedirect = value == "true"
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' HTTP redirect %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[httpRedirect]))
+					fmt.Printf("Site '%s' HTTP redirect %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[httpRedirect])
 				case "entrypoints", "entry-points":
 					entryPoints = strings.Split(value, ",")
 					for i := range entryPoints {
 						entryPoints[i] = strings.TrimSpace(entryPoints[i])
 					}
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' using custom entry points: %v\n", site.Attributes.Name, entryPoints))
+					fmt.Printf("Site '%s' using custom entry points: %v\n", site.Attributes.Name, entryPoints)
 				case "aliases":
 					for _, a := range strings.Split(value, ",") {
 						if a = strings.TrimSpace(a); a != "" {
 							tagAliases = append(tagAliases, a)
 						}
 					}
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' tag aliases: %v\n", site.Attributes.Name, tagAliases))
+					fmt.Printf("Site '%s' tag aliases: %v\n", site.Attributes.Name, tagAliases)
 				case "reverb-port":
 					if n, err := fmt.Sscanf(value, "%d", &reverbPortOverride); err == nil && n == 1 {
-						os.Stdout.WriteString(fmt.Sprintf("Site '%s' reverb port overridden to %d via tag\n", site.Attributes.Name, reverbPortOverride))
+						fmt.Printf("Site '%s' reverb port overridden to %d via tag\n", site.Attributes.Name, reverbPortOverride)
 					}
 				case "middlewares", "middleware":
 					for _, m := range strings.Split(value, ",") {
@@ -708,25 +711,25 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 							tagMiddlewares = append(tagMiddlewares, m)
 						}
 					}
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' extra middlewares: %v\n", site.Attributes.Name, tagMiddlewares))
+					fmt.Printf("Site '%s' extra middlewares: %v\n", site.Attributes.Name, tagMiddlewares)
 				}
 			}
 
 			// Skip if site is disabled
 			if !siteEnabled {
-				os.Stdout.WriteString(fmt.Sprintf("Site '%s' disabled, skipping\n", site.Attributes.Name))
+				fmt.Printf("Site '%s' disabled, skipping\n", site.Attributes.Name)
 				continue
 			}
 
 			// Fetch domain records and reverb integration in parallel context.
 			domains, err := p.fetchForgeDomains(server.ID, site.ID)
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("Failed to fetch domains for site '%s': %v, falling back to site name\n", site.Attributes.Name, err))
+				fmt.Fprintf(os.Stderr, "Failed to fetch domains for site '%s': %v, falling back to site name\n", site.Attributes.Name, err)
 			}
 
 			reverb, err := p.fetchReverbIntegration(server.ID, site.ID)
 			if err != nil {
-				os.Stderr.WriteString(fmt.Sprintf("Failed to fetch reverb integration for site '%s': %v\n", site.Attributes.Name, err))
+				fmt.Fprintf(os.Stderr, "Failed to fetch reverb integration for site '%s': %v\n", site.Attributes.Name, err)
 			}
 
 			// reverbHost is the authoritative reverb hostname from the integration.
@@ -840,7 +843,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					tlsInfo += " + HTTP redirect"
 				}
 			}
-			os.Stdout.WriteString(fmt.Sprintf("Created router for site '%s' hosts=%v -> %s (%s)\n", site.Attributes.Name, mainHosts, siteBackendURL, tlsInfo))
+			fmt.Printf("Created router for site '%s' hosts=%v -> %s (%s)\n", site.Attributes.Name, mainHosts, siteBackendURL, tlsInfo)
 
 			// Create separate routers for Reverb (WebSocket) domains
 			if len(reverbHosts) > 0 && reverbPort > 0 {
@@ -880,7 +883,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 						PassHostHeader: boolPtr(true),
 					},
 				}
-				os.Stdout.WriteString(fmt.Sprintf("Created Reverb router for site '%s' hosts=%v -> %s\n", site.Attributes.Name, reverbHosts, reverbBackendURL))
+				fmt.Printf("Created Reverb router for site '%s' hosts=%v -> %s\n", site.Attributes.Name, reverbHosts, reverbBackendURL)
 			}
 		}
 	}
@@ -953,7 +956,7 @@ func (p *Provider) DumpRaw() ([]byte, error) {
 // fetchRaw performs a GET request and returns the raw response body.
 // Returns nil, nil for non-200 responses (used for probing optional endpoints).
 func (p *Provider) fetchRaw(url string) (json.RawMessage, error) {
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -964,7 +967,7 @@ func (p *Provider) fetchRaw(url string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil
@@ -981,7 +984,7 @@ func (p *Provider) fetchRaw(url string) (json.RawMessage, error) {
 // a list of wildcard-enabled hosts. Wildcard hosts get an additional HostRegexp
 // clause matching any single-level subdomain (e.g. app.bounceiq.com).
 func buildHostRule(hosts []string, wildcardHosts []string) string {
-	var parts []string
+	parts := make([]string, 0, len(hosts)+len(wildcardHosts))
 	for _, h := range hosts {
 		parts = append(parts, fmt.Sprintf("Host(`%s`)", h))
 	}

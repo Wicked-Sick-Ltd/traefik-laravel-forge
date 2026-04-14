@@ -7,11 +7,16 @@ import (
 	forge "github.com/wickedsick/traefik-laravel-forge"
 )
 
+const (
+	testAPIToken     = "test-token"
+	testOrganization = "test-org"
+)
+
 func TestNew(t *testing.T) {
 	config := forge.CreateConfig()
 	config.PollInterval = "10s" // Use minimum valid interval
-	config.APIToken = "test-token"
-	config.Organization = "test-org"
+	config.APIToken = testAPIToken
+	config.Organization = testOrganization
 
 	provider, err := forge.New(context.Background(), config, "test")
 	if err != nil {
@@ -35,7 +40,7 @@ func TestNewMissingAPIToken(t *testing.T) {
 	config := forge.CreateConfig()
 	config.PollInterval = "1s"
 	config.APIToken = "" // Missing token
-	config.Organization = "test-org"
+	config.Organization = testOrganization
 
 	_, err := forge.New(context.Background(), config, "test")
 	if err == nil {
@@ -46,7 +51,7 @@ func TestNewMissingAPIToken(t *testing.T) {
 func TestNewMissingOrganization(t *testing.T) {
 	config := forge.CreateConfig()
 	config.PollInterval = "1s"
-	config.APIToken = "test-token"
+	config.APIToken = testAPIToken
 	config.Organization = "" // Missing organization
 
 	_, err := forge.New(context.Background(), config, "test")
@@ -58,8 +63,8 @@ func TestNewMissingOrganization(t *testing.T) {
 func TestNewInvalidPollInterval(t *testing.T) {
 	config := forge.CreateConfig()
 	config.PollInterval = "invalid"
-	config.APIToken = "test-token"
-	config.Organization = "test-org"
+	config.APIToken = testAPIToken
+	config.Organization = testOrganization
 
 	_, err := forge.New(context.Background(), config, "test")
 	if err == nil {
@@ -70,8 +75,8 @@ func TestNewInvalidPollInterval(t *testing.T) {
 func TestInitInvalidPollInterval(t *testing.T) {
 	config := forge.CreateConfig()
 	config.PollInterval = "0s"
-	config.APIToken = "test-token"
-	config.Organization = "test-org"
+	config.APIToken = testAPIToken
+	config.Organization = testOrganization
 
 	provider, err := forge.New(context.Background(), config, "test")
 	if err != nil {
@@ -87,8 +92,8 @@ func TestInitInvalidPollInterval(t *testing.T) {
 func TestInitPollIntervalTooShort(t *testing.T) {
 	config := forge.CreateConfig()
 	config.PollInterval = "5s" // Less than 10s minimum
-	config.APIToken = "test-token"
-	config.Organization = "test-org"
+	config.APIToken = testAPIToken
+	config.Organization = testOrganization
 
 	provider, err := forge.New(context.Background(), config, "test")
 	if err != nil {
@@ -110,8 +115,8 @@ func TestInitPollIntervalTooShort(t *testing.T) {
 func TestInitPollIntervalValid(t *testing.T) {
 	config := forge.CreateConfig()
 	config.PollInterval = "10s" // Exactly 10s - should be valid
-	config.APIToken = "test-token"
-	config.Organization = "test-org"
+	config.APIToken = testAPIToken
+	config.Organization = testOrganization
 
 	provider, err := forge.New(context.Background(), config, "test")
 	if err != nil {

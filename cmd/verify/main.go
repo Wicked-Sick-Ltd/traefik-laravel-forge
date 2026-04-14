@@ -56,12 +56,13 @@ func main() {
 	}
 
 	if *dumpRaw {
-		raw, err := provider.DumpRaw()
+		var dumpData []byte
+		dumpData, err = provider.DumpRaw()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(string(raw))
+		fmt.Println(string(dumpData))
 		return
 	}
 
@@ -209,7 +210,7 @@ type routerInfo struct {
 	tls     bool
 }
 
-// extractHost pulls the domain from a Traefik Host() rule, e.g. "Host(`example.com`)" -> "example.com"
+// extractHost pulls the domain from a Traefik Host() rule, e.g. "Host(`example.com`)" -> "example.com".
 func extractHost(rule string) string {
 	start := strings.Index(rule, "Host(`")
 	if start == -1 {
@@ -226,11 +227,11 @@ func extractHost(rule string) string {
 // extractHostsFromConfig does a simple line-by-line scan of a YAML/TOML dynamic config
 // looking for Host(`...`) patterns. Works without a full YAML parser.
 func extractHostsFromConfig(path string) (map[string]bool, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path comes from CLI flag, intentional
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	hosts := make(map[string]bool)
 	scanner := bufio.NewScanner(f)
