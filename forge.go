@@ -92,6 +92,30 @@ type ForgeSiteAttributes struct {
 	Tags   []string `json:"-"` // Populated from relationships+included after decode
 }
 
+// ForgeDomain represents a domain record attached to a Forge site.
+// The /domains endpoint returns these (type: "domainRecords").
+type ForgeDomain struct {
+	ID         string              `json:"id"`
+	Type       string              `json:"type"`
+	Attributes ForgeDomainAttributes `json:"attributes"`
+}
+
+// ForgeDomainAttributes holds domain record details.
+// DomainType is one of: "primary", "alias", "reverb".
+type ForgeDomainAttributes struct {
+	Name                  string `json:"name"`
+	DomainType            string `json:"type"`
+	Status                string `json:"status"`
+	AllowWildcardSubdomains bool  `json:"allow_wildcard_subdomains"`
+}
+
+// ForgeDomainsResponse is the JSON:API response from the /domains endpoint.
+type ForgeDomainsResponse struct {
+	Data  []ForgeDomain `json:"data"`
+	Links interface{}   `json:"links"`
+	Meta  interface{}   `json:"meta"`
+}
+
 // ForgeServersResponse represents the JSON:API response from listing servers.
 type ForgeServersResponse struct {
 	Data     []ForgeServer `json:"data"`
@@ -345,6 +369,23 @@ func buildTagMap(included []interface{}) map[string]string {
 	return tagMap
 }
 
+// fetchForgeDomains retrieves all domain records for a site from the /domains endpoint.
+func (p *Provider) fetchForgeDomains(serverID, siteID string) ([]ForgeDomain, error) {
+	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s/domains", p.organization, serverID, siteID)
+	raw, err := p.fetchRaw(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch domains: %w", err)
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	var resp ForgeDomainsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("failed to decode domains response: %w", err)
+	}
+	return resp.Data, nil
+}
+
 // ParseTagConfig parses a tag for configuration directives.
 // Format: "traefik:key=value" or "traefik:flag"
 // Returns key, value, and whether it's a traefik tag.
@@ -567,12 +608,11 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			// Parse site tags for configuration
 			certResolver := p.defaultCertResolver
 			enableTLS := p.defaultCertResolver != ""
-			siteEnabled := p.defaultSitesEnabled // Start with default
-			sitePort := upstreamPort              // Default to server port
-			httpRedirect := p.httpRedirect        // Start with global setting
+			siteEnabled := p.defaultSitesEnabled
+			sitePort := upstreamPort
+			httpRedirect := p.httpRedirect
 			var entryPoints []string
-			hostOverride := ""   // traefik:host= overrides the Forge site name in the Host() rule
-			var hostAliases []string // traefik:aliases= adds extra hosts to the Host() rule
+			var tagAliases []string // extra hosts from traefik:aliases= tag
 
 			for _, tag := range site.Attributes.Tags {
 				key, value, isTraefikTag := ParseTagConfig(tag)
@@ -592,7 +632,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					enableTLS = value == "true"
 					os.Stdout.WriteString(fmt.Sprintf("Site '%s' TLS %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[enableTLS]))
 				case "port":
-					if port, err := fmt.Sscanf(value, "%d", &sitePort); err == nil && port == 1 {
+					if n, err := fmt.Sscanf(value, "%d", &sitePort); err == nil && n == 1 {
 						os.Stdout.WriteString(fmt.Sprintf("Site '%s' using port %d from tag\n", site.Attributes.Name, sitePort))
 					}
 				case "http-redirect", "redirect":
@@ -604,16 +644,13 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 						entryPoints[i] = strings.TrimSpace(entryPoints[i])
 					}
 					os.Stdout.WriteString(fmt.Sprintf("Site '%s' using custom entry points: %v\n", site.Attributes.Name, entryPoints))
-				case "host":
-					hostOverride = value
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' host overridden to '%s' via tag\n", site.Attributes.Name, value))
 				case "aliases":
 					for _, a := range strings.Split(value, ",") {
 						if a = strings.TrimSpace(a); a != "" {
-							hostAliases = append(hostAliases, a)
+							tagAliases = append(tagAliases, a)
 						}
 					}
-					os.Stdout.WriteString(fmt.Sprintf("Site '%s' aliases: %v\n", site.Attributes.Name, hostAliases))
+					os.Stdout.WriteString(fmt.Sprintf("Site '%s' tag aliases: %v\n", site.Attributes.Name, tagAliases))
 				}
 			}
 
@@ -623,12 +660,51 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				continue
 			}
 
+			// Fetch domain records to find the real hostnames for this site.
+			domains, err := p.fetchForgeDomains(server.ID, site.ID)
+			if err != nil {
+				os.Stderr.WriteString(fmt.Sprintf("Failed to fetch domains for site '%s': %v, falling back to site name\n", site.Attributes.Name, err))
+			}
+
+			// Collect primary/alias domain names; separate out reverb domains.
+			var mainHosts []string    // used in the primary Host() rule
+			var reverbHosts []string  // get their own router on reverbPort
+
+			if len(domains) > 0 {
+				for _, d := range domains {
+					if d.Attributes.Status != "enabled" {
+						continue
+					}
+					switch d.Attributes.DomainType {
+					case "primary", "alias":
+						mainHosts = append(mainHosts, d.Attributes.Name)
+					case "reverb":
+						reverbHosts = append(reverbHosts, d.Attributes.Name)
+					}
+				}
+			}
+
+			// If no domain records came back, fall back to the Forge site name.
+			if len(mainHosts) == 0 {
+				mainHosts = []string{site.Attributes.Name}
+			}
+
+			// Append any hosts from traefik:aliases= tag not already present.
+			existing := make(map[string]bool)
+			for _, h := range mainHosts {
+				existing[h] = true
+			}
+			for _, a := range tagAliases {
+				if !existing[a] {
+					mainHosts = append(mainHosts, a)
+				}
+			}
+
 			// Build backend URL with site-specific port
 			siteBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, sitePort)
 
 			// Determine entry points
 			if len(entryPoints) == 0 {
-				// Default entry points based on TLS configuration
 				if enableTLS {
 					entryPoints = []string{"websecure"}
 				} else {
@@ -636,31 +712,21 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				}
 			}
 
-			// Build Host() rule — tag overrides take priority over the Forge site name
-			primaryHost := site.Attributes.Name
-			if hostOverride != "" {
-				primaryHost = hostOverride
-			}
-			hostRule := fmt.Sprintf("Host(`%s`)", primaryHost)
-			for _, alias := range hostAliases {
-				hostRule += fmt.Sprintf(" || Host(`%s`)", alias)
-			}
+			// Build Host() rule from all main hosts
+			hostRule := buildHostRule(mainHosts)
 
-			// Create the HTTPS/main router
+			// Create the main router
 			router := &dynamic.Router{
 				EntryPoints: entryPoints,
 				Service:     serviceName,
 				Rule:        hostRule,
 			}
-
-			// Add TLS configuration if enabled
 			if enableTLS {
 				router.TLS = &dynamic.RouterTLSConfig{}
 				if certResolver != "" {
 					router.TLS.CertResolver = certResolver
 				}
 			}
-
 			configuration.HTTP.Routers[routerName] = router
 
 			// Create HTTP redirect router if needed
@@ -671,24 +737,16 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					Service:     serviceName,
 					Rule:        hostRule,
 				}
-
-				// Add redirect middleware if specified
 				if p.redirectMiddleware != "" {
 					httpRouter.Middlewares = []string{p.redirectMiddleware}
 				}
-
 				configuration.HTTP.Routers[httpRouterName] = httpRouter
-				os.Stdout.WriteString(fmt.Sprintf("Created HTTP redirect router for site '%s'\n", site.Attributes.Name))
 			}
 
-			// Create the service pointing to the load balancer host
+			// Create the service
 			configuration.HTTP.Services[serviceName] = &dynamic.Service{
 				LoadBalancer: &dynamic.ServersLoadBalancer{
-					Servers: []dynamic.Server{
-						{
-							URL: siteBackendURL,
-						},
-					},
+					Servers:        []dynamic.Server{{URL: siteBackendURL}},
 					PassHostHeader: boolPtr(true),
 				},
 			}
@@ -704,7 +762,48 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					tlsInfo += " + HTTP redirect"
 				}
 			}
-			os.Stdout.WriteString(fmt.Sprintf("Created router for site '%s' -> %s (%s)\n", site.Attributes.Name, siteBackendURL, tlsInfo))
+			os.Stdout.WriteString(fmt.Sprintf("Created router for site '%s' hosts=%v -> %s (%s)\n", site.Attributes.Name, mainHosts, siteBackendURL, tlsInfo))
+
+			// Create separate routers for Reverb (WebSocket) domains on port 8080
+			if len(reverbHosts) > 0 {
+				reverbPort := 8080
+				reverbServiceName := fmt.Sprintf("%s-reverb-service", routerName)
+				reverbBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, reverbPort)
+				reverbRule := buildHostRule(reverbHosts)
+
+				reverbRouter := &dynamic.Router{
+					EntryPoints: entryPoints,
+					Service:     reverbServiceName,
+					Rule:        reverbRule,
+				}
+				if enableTLS {
+					reverbRouter.TLS = &dynamic.RouterTLSConfig{}
+					if certResolver != "" {
+						reverbRouter.TLS.CertResolver = certResolver
+					}
+				}
+				configuration.HTTP.Routers[fmt.Sprintf("%s-reverb", routerName)] = reverbRouter
+
+				if httpRedirect && enableTLS {
+					reverbHTTPRouter := &dynamic.Router{
+						EntryPoints: []string{"web"},
+						Service:     reverbServiceName,
+						Rule:         reverbRule,
+					}
+					if p.redirectMiddleware != "" {
+						reverbHTTPRouter.Middlewares = []string{p.redirectMiddleware}
+					}
+					configuration.HTTP.Routers[fmt.Sprintf("%s-reverb-http", routerName)] = reverbHTTPRouter
+				}
+
+				configuration.HTTP.Services[reverbServiceName] = &dynamic.Service{
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers:        []dynamic.Server{{URL: reverbBackendURL}},
+						PassHostHeader: boolPtr(true),
+					},
+				}
+				os.Stdout.WriteString(fmt.Sprintf("Created Reverb router for site '%s' hosts=%v -> %s\n", site.Attributes.Name, reverbHosts, reverbBackendURL))
+			}
 		}
 	}
 
@@ -717,7 +816,8 @@ func (p *Provider) GenerateConfiguration() (*dynamic.Configuration, error) {
 	return p.generateConfiguration()
 }
 
-// DumpRaw fetches raw JSON from the Forge API for all servers and their sites.
+// DumpRaw fetches raw JSON from the Forge API for all servers, their sites,
+// individual site details, and any aliases/custom-domain endpoints.
 // Useful for inspecting the actual API response shape during development.
 func (p *Provider) DumpRaw() ([]byte, error) {
 	servers, rawServers, err := p.fetchForgeServersRaw()
@@ -725,33 +825,96 @@ func (p *Provider) DumpRaw() ([]byte, error) {
 		return nil, err
 	}
 
-	type sitesDump struct {
+	type siteDump struct {
 		ServerID   string          `json:"server_id"`
 		ServerName string          `json:"server_name"`
-		Raw        json.RawMessage `json:"raw"`
+		SitesList  json.RawMessage `json:"sites_list"`
+		SiteDetail []json.RawMessage `json:"site_detail"`
+		Aliases    []json.RawMessage `json:"aliases"`
 	}
-	siteDumps := []sitesDump{}
+	var siteDumps []siteDump
 
 	for _, server := range servers {
-		_, raw, err := p.fetchForgeSitesRaw(server.ID)
+		sites, raw, err := p.fetchForgeSitesRaw(server.ID)
 		if err != nil {
 			return nil, fmt.Errorf("sites for server %s: %w", server.Attributes.Name, err)
 		}
-		siteDumps = append(siteDumps, sitesDump{
+
+		dump := siteDump{
 			ServerID:   server.ID,
 			ServerName: server.Attributes.Name,
-			Raw:        raw,
-		})
+			SitesList:  raw,
+		}
+
+		// For each site, fetch the individual detail endpoint and the aliases endpoint.
+		for _, site := range sites {
+			detail, _ := p.fetchRaw(fmt.Sprintf(
+				"https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s",
+				p.organization, server.ID, site.ID,
+			))
+			if detail != nil {
+				dump.SiteDetail = append(dump.SiteDetail, detail)
+			}
+
+			// Try several candidate endpoints for custom domains/aliases.
+			for _, path := range []string{"aliases", "domains", "custom-domains"} {
+				aliasRaw, _ := p.fetchRaw(fmt.Sprintf(
+					"https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s/%s",
+					p.organization, server.ID, site.ID, path,
+				))
+				if aliasRaw != nil {
+					dump.Aliases = append(dump.Aliases, aliasRaw)
+				}
+			}
+		}
+
+		siteDumps = append(siteDumps, dump)
 	}
 
 	out := struct {
 		Servers json.RawMessage `json:"servers"`
-		Sites   []sitesDump     `json:"sites"`
+		Sites   []siteDump      `json:"sites"`
 	}{
 		Servers: rawServers,
 		Sites:   siteDumps,
 	}
 	return json.MarshalIndent(out, "", "  ")
+}
+
+// fetchRaw performs a GET request and returns the raw response body.
+// Returns nil, nil for non-200 responses (used for probing optional endpoints).
+func (p *Provider) fetchRaw(url string) (json.RawMessage, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.apiToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(body), nil
+}
+
+// buildHostRule builds a Traefik Host() rule from one or more hostnames.
+func buildHostRule(hosts []string) string {
+	parts := make([]string, len(hosts))
+	for i, h := range hosts {
+		parts[i] = fmt.Sprintf("Host(`%s`)", h)
+	}
+	return strings.Join(parts, " || ")
 }
 
 func boolPtr(v bool) *bool {
