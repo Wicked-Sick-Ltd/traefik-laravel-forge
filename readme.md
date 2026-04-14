@@ -1,101 +1,77 @@
-# Traefik Laravel Forge Provider Plugin
+# traefik-laravel-forge
 
-[![Build Status](https://github.com/wickedsick/traefik-laravel-forge/workflows/Main/badge.svg?branch=master)](https://github.com/wickedsick/traefik-laravel-forge/actions)
+A [Traefik](https://traefik.io) provider plugin that automatically generates HTTP routers from your [Laravel Forge](https://forge.laravel.com) sites. Add a site to Forge and it appears in Traefik within 30 seconds — no config file edits, no restarts.
 
-A Traefik provider plugin that automatically creates HTTP routers based on sites managed in Laravel Forge. **Configure everything via Forge tags** - no config file changes needed after initial setup!
+## Requirements
 
-## Features
+- Traefik v3
+- Laravel Forge account with API access
+- Go 1.19+ (development only)
 
-- **🏷️ 100% Tag-Based Configuration**: Configure everything via Forge tags after initial setup
-- **🔄 Automatic Site Discovery**: Discovers sites from Laravel Forge via API v2
-- **🎯 Smart Server Mapping**: Configure servers via tags or config file
-- **🔍 Auto-IP Detection**: Automatically uses private IPs from Forge
-- **🔒 TLS/HTTPS Support**: Automatic certificate management with Let's Encrypt
-- **⚡ Real-time Updates**: Polls Forge API at configurable intervals (default: 30s)
-- **🛡️ Security First**: Only creates routes for sites with "installed" status
-- **📝 Flexible Configuration**: Use tags, config file, or both (tags take priority)
+## How it works
 
-## Use Case
+On each poll the plugin:
 
-This plugin is ideal when you have:
-- Multiple application servers (e.g., app01, app02, app03) managed by Forge
-- One or more Traefik load balancers (e.g., lb01, lb02) in front of them
-- A need to automatically route traffic based on domain names to the appropriate backend servers
-- Want to manage configuration through Forge UI without editing config files
+1. Fetches all servers in your Forge organisation
+2. For each server, fetches its sites and their domain records (`/domains`)
+3. Fetches the Reverb WebSocket integration config per site (`/integrations/reverb`)
+4. Auto-detects the server's private IP (falls back to public IP)
+5. Generates Traefik routers and services for all installed sites
 
-## Quick Start: Tag-Based Setup
+Each site produces:
+- A **main router** covering all its primary and alias domains (with `HostRegexp` for wildcard-enabled domains)
+- An **HTTP redirect router** (if `httpRedirect` is enabled)
+- A **Reverb router** on the Reverb port (if Reverb is configured in Forge)
 
-After initial Traefik configuration, manage everything via tags:
-
-**1. (Optional) Add server tags only if you need to override IP/port:**
-```
-traefik:lb-host=10.0.1.10
-traefik:lb-port=8080
-```
-Otherwise, the plugin auto-detects the private IP and uses port 80.
-
-**2. Control which sites are exposed via site tags:**
-```
-traefik:enabled=true              # Enable a site
-traefik:cert-resolver=letsencrypt # Override cert resolver
-traefik:tls=false                 # Disable TLS
-```
-
-**3. Done!** Servers are automatically enabled if they have enabled sites. Changes apply on next poll (30s default), no config file edits or restarts needed.
-
-See [TAG_CONFIGURATION.md](TAG_CONFIGURATION.md) for the complete guide.
+No `serverMappings` config is required — the plugin discovers everything from Forge automatically.
 
 ## Installation
 
-### Local Mode (Development/Testing)
+### From the Traefik Plugin Catalog
 
-1. Clone this repository to your local `plugins-local` directory:
+```yaml
+# traefik.yml
+experimental:
+  plugins:
+    forge:
+      moduleName: github.com/wickedsick/traefik-laravel-forge
+      version: v1.0.0
+```
+
+### Local / development mode
 
 ```bash
 mkdir -p ./plugins-local/src/github.com/wickedsick
-cd ./plugins-local/src/github.com/wickedsick
-git clone <your-repo-url> traefik-laravel-forge
+git clone https://github.com/wickedsick/traefik-laravel-forge \
+  ./plugins-local/src/github.com/wickedsick/traefik-laravel-forge
 ```
 
-2. Configure Traefik to use the local plugin:
-
 ```yaml
-# traefik.yml (static configuration)
-entryPoints:
-  web:
-    address: :80
-  websecure:
-    address: :443
-
-log:
-  level: DEBUG
-
+# traefik.yml
 experimental:
   localPlugins:
     forge:
       moduleName: github.com/wickedsick/traefik-laravel-forge
-
-providers:
-  plugin:
-    forge:
-      apiToken: "your-forge-api-token"
-      organization: "your-org-slug"
-      pollInterval: "30s"
-      serverMappings:
-        - forgeServerName: "app01"
-          upstreamHost: "10.0.1.10:80"
-          traefik: "lb01"
-        - forgeServerName: "app02"
-          upstreamHost: "10.0.1.11:80"
-          traefik: "lb01"
 ```
 
-### Production Mode (GitHub)
-
-Once published to GitHub with the `traefik-plugin` topic:
+## Minimal configuration
 
 ```yaml
-# traefik.yml (static configuration)
+# traefik.yml
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+certificatesResolvers:
+  cloudflare:
+    acme:
+      email: you@example.com
+      storage: /etc/traefik/acme/acme.json
+      dnsChallenge:
+        provider: cloudflare
+
 experimental:
   plugins:
     forge:
@@ -107,226 +83,195 @@ providers:
     forge:
       apiToken: "your-forge-api-token"
       organization: "your-org-slug"
-      pollInterval: "30s"
-      serverMappings:
-        - forgeServerName: "app01"
-          upstreamHost: "10.0.1.10:80"
-          traefik: "lb01"
+      defaultCertResolver: "cloudflare"
+      httpRedirect: true
 ```
 
-## Configuration
+That's all that's needed. The plugin discovers your servers and sites automatically.
 
-### Required Parameters
+## Plugin configuration reference
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `apiToken` | string | Your Laravel Forge API token (get it from forge.laravel.com/user/profile#/api) |
-| `organization` | string | Your Forge organization slug (found in URL: forge.laravel.com/orgs/{organization}) |
-| `defaultCertResolver` | string | Default certificate resolver for automatic TLS (optional) |
-| `defaultSitesEnabled` | bool | Whether sites are enabled by default (default: `true`). Set to `false` for opt-in mode. |
-| `httpRedirect` | bool | Create HTTP->HTTPS redirect routers (default: `false`) |
-| `redirectMiddleware` | string | Name of middleware to use for HTTP redirects (e.g., `"https-redirect"`) |
-| `serverMappings` | array | List of server mappings (see below) |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `apiToken` | string | **required** | Forge API token — generate at forge.laravel.com/user/profile#/api |
+| `organization` | string | **required** | Forge organisation slug — from the URL: `forge.laravel.com/orgs/{slug}` |
+| `pollInterval` | string | `"30s"` | How often to poll Forge. Minimum `"10s"` |
+| `defaultCertResolver` | string | `""` | Cert resolver name to use for all sites. Enables TLS when set |
+| `defaultSitesEnabled` | bool | `true` | Set to `false` for opt-in mode: only sites with `traefik:enabled` tag are routed |
+| `httpRedirect` | bool | `false` | Generate HTTP→HTTPS redirect routers for all sites |
+| `redirectMiddleware` | string | `""` | Name of an externally-defined redirect middleware to use. If empty and `httpRedirect` is `true`, the plugin creates `forge-https-redirect` automatically |
+| `serverMappings` | array | `[]` | Optional: explicitly set the upstream host/port for specific servers (tags take priority over this) |
 
-### Optional Parameters
+### serverMappings
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `pollInterval` | string | "30s" | How often to poll the Forge API for changes (minimum: 10s) |
-
-### Server Mappings
-
-Each server mapping defines how a Forge server should be exposed:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `forgeServerName` | string | The name of the server in Laravel Forge (e.g., "app01") |
-| `upstreamHost` | string | (Optional) The upstream IP where the server can be reached. If omitted, auto-detected from Forge API |
-| `upstreamPort` | int | (Optional) The upstream port to use (default: 80) |
-| `traefik` | string | Identifier for which Traefik instance should handle this (informational) |
-
-## How It Works
-
-1. **Polling**: The plugin polls the Forge API at the specified interval
-2. **Server Discovery**: It fetches all servers from your Forge account
-3. **Mapping**: For each server, it checks if there's a corresponding `serverMapping`
-4. **Site Discovery**: For mapped servers, it fetches all sites
-5. **Route Creation**: For each site with status "installed", it creates:
-   - An HTTP router with a Host rule matching the site's domain
-   - A service pointing to the `upstreamHost` from the mapping
-   - PassHostHeader is enabled so the backend receives the original Host header
-
-### Example Flow
-
-Given this configuration:
-```yaml
-serverMappings:
-  - forgeServerName: "app01"
-    upstreamHost: "10.0.1.10:80"
-    traefik: "lb01"
-```
-
-If Forge server "app01" has sites:
-- example.com (status: installed)
-- test.com (status: installing)
-
-The plugin will create:
-- Router for `example.com` → `http://10.0.1.10:80` (with Host header preserved)
-- No router for `test.com` (status not "installed")
-
-## Security Considerations
-
-1. **API Token**: Store your Forge API token securely. Consider using environment variables or secrets management.
-2. **Unmapped Servers**: Servers without explicit mappings are ignored, preventing unintended exposure.
-3. **Network Access**: Ensure your Traefik instance can reach the internal IPs specified in `upstreamHost`.
-4. **HTTPS**: This plugin creates HTTP routers. Use Traefik's built-in TLS features for HTTPS termination.
-
-## Advanced Features
-
-### Auto-Detection of Server IPs
-
-The plugin can automatically detect server IP addresses from Forge, preferring private IPs for internal networks:
+Only needed if you want to override the auto-detected IP or port for a specific server.
 
 ```yaml
 serverMappings:
-  # Automatically uses private_ip_address from Forge
-  - forgeServerName: "app01"
-    upstreamPort: 80
+  - forgeServerName: "app01"   # must match name in Forge exactly
+    upstreamHost: "10.0.1.10"  # override auto-detected IP
+    upstreamPort: 8080          # override default port 80
 ```
 
-See [FEATURES.md](FEATURES.md#auto-detection-of-server-ips) for details.
+## Forge tags
 
-### TLS Certificate Management
+Tags on Forge servers and sites configure routing behaviour. Format: `traefik:key=value`.
 
-Configure automatic HTTPS with Let's Encrypt:
+### Site tags
 
-```yaml
-providers:
-  plugin:
-    forge:
-      defaultCertResolver: "letsencrypt"
+Add these to any site in Forge to control how it's routed:
 
-certificatesResolvers:
-  letsencrypt:
-    acme:
-      email: your-email@example.com
-      storage: /acme.json
-      httpChallenge:
-        entryPoint: web
+| Tag | Example | Description |
+|-----|---------|-------------|
+| `traefik:enabled` | `traefik:enabled=false` | Enable or disable routing for this site. Useful with `defaultSitesEnabled: false` |
+| `traefik:cert-resolver` | `traefik:cert-resolver=letsencrypt` | Override the cert resolver for this site |
+| `traefik:tls` | `traefik:tls=true` | Force TLS on or off regardless of `defaultCertResolver` |
+| `traefik:port` | `traefik:port=8080` | Override the backend port for this site |
+| `traefik:http-redirect` | `traefik:http-redirect=false` | Override the global `httpRedirect` setting for this site |
+| `traefik:entrypoints` | `traefik:entrypoints=websecure,web` | Override entry points (comma-separated) |
+| `traefik:aliases` | `traefik:aliases=app.example.com,www.example.com` | Add extra hostnames to the router rule (comma-separated) |
+| `traefik:reverb-port` | `traefik:reverb-port=8081` | Override the auto-detected Reverb WebSocket port |
+
+### Server tags
+
+Add these to a server in Forge to override how it's addressed:
+
+| Tag | Example | Description |
+|-----|---------|-------------|
+| `traefik:upstream-host` | `traefik:upstream-host=10.0.1.10` | Override the auto-detected server IP |
+| `traefik:upstream-port` | `traefik:upstream-port=8080` | Override the default backend port (80) |
+| `traefik:traefik-id` | `traefik:traefik-id=lb01` | Informational: which Traefik instance handles this server |
+
+Aliases accepted for backwards compatibility: `lb-host`, `lb-port`, `loadbalancer-host`, `loadbalancer-port`.
+
+### Configuration priority
+
+For any given setting, the resolution order is:
+
+1. **Site tag** (highest — per-site override)
+2. **Server tag** (server-level override)
+3. **Server mapping** (config file)
+4. **Plugin config default**
+5. **Auto-detected from Forge** (lowest — IP from server record)
+
+## Auto-discovered routing
+
+### Domains
+
+The plugin fetches all domain records for each site. Domain types:
+
+- `primary` — the site's main domain, always included in the Host() rule
+- `alias` — additional domains, included in the Host() rule
+- `reverb` — Laravel Reverb WebSocket domain, gets its own router (see below)
+
+If a primary domain has **wildcard subdomains enabled** in Forge, a `HostRegexp` clause is automatically appended:
+
+```
+Host(`example.com`) || HostRegexp(`^[^.]+\.example\.com$`)
 ```
 
-All sites will automatically get TLS enabled with the specified resolver.
+This covers `app.example.com`, `www.example.com`, etc. without any additional configuration.
 
-### Per-Site Configuration via Tags
+### Reverb WebSocket
 
-Configure individual sites using tags in Forge (no config file changes needed):
+If a site has Reverb configured in Forge, the plugin automatically:
 
-| Tag | Effect |
-|-----|--------|
-| `traefik:enabled=true/false` | Enable/disable site |
-| `traefik:port=8080` | Override backend port |
-| `traefik:cert-resolver=letsencrypt` | Use specific cert resolver |
-| `traefik:tls=true/false` | Enable/disable TLS |
-| `traefik:http-redirect=true/false` | Enable/disable HTTP->HTTPS redirect |
-| `traefik:entrypoints=websecure` | Custom entry points |
+1. Fetches the Reverb host and port from `/integrations/reverb`
+2. Creates a **separate router** for the Reverb domain pointing to that port
+3. Applies the same TLS and HTTP redirect settings as the main router
 
-**Example**: Add `traefik:cert-resolver=letsencrypt-staging` tag to a site in Forge to use staging certificates for testing.
+Use `traefik:reverb-port=NNNN` to override the detected port if needed.
 
-See [FEATURES.md](FEATURES.md) for comprehensive documentation on all advanced features.
+## What to keep in static config
 
-## Logging
+The plugin handles app routing. Some things are outside its scope and belong in static TOML/YAML files alongside the plugin:
 
-The plugin logs to stdout and stderr:
-- Server and site discovery information
-- IP auto-detection results
-- TLS configuration decisions
-- Tag parsing results
-- Mapping decisions
-- Errors from the Forge API
+| Config | Reason |
+|--------|--------|
+| Vanity domain redirects (e.g. `old-brand.com` → `new-brand.com`) | Not a Forge site — purely a routing policy |
+| Traefik API dashboard | Not related to Forge |
+| Custom middleware definitions (rate limiting, auth, etc.) | Middleware is referenced by name; define it once in static config |
 
-Enable Traefik's DEBUG log level to see detailed plugin output:
-```yaml
-log:
-  level: DEBUG
+Example static file that can coexist with the plugin:
+
+```toml
+# /etc/traefik/conf.d/redirects.toml
+[http.routers.old-brand]
+  rule = "Host(`old-brand.com`)"
+  entryPoints = ["websecure"]
+  middlewares = ["old-brand-redirect"]
+  service = "noop@internal"
+  [http.routers.old-brand.tls]
+    certResolver = "cloudflare"
+
+[http.middlewares.old-brand-redirect.redirectRegex]
+  regex = "^https://old-brand\\.com/(.*)"
+  replacement = "https://new-brand.com/${1}"
+  permanent = true
 ```
+
+## Verification tool
+
+The `cmd/verify` tool lets you preview what the plugin would generate against your live Forge account — without running Traefik:
+
+```bash
+# Preview generated configuration
+FORGE_TOKEN=xxx FORGE_ORG=my-org go run ./cmd/verify \
+  --cert-resolver cloudflare \
+  --http-redirect \
+  --redirect-middleware https-redirect
+
+# Compare against an existing Traefik dynamic config file
+go run ./cmd/verify ... --compare /etc/traefik/conf.d/mysite.toml
+
+# Dump raw Forge API responses (useful for debugging)
+go run ./cmd/verify ... --dump
+
+# Output the full generated config as JSON
+go run ./cmd/verify ... --json
+```
+
+Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`.
 
 ## Troubleshooting
 
-### No routes are being created
+**No routes created**
+- Check `apiToken` and `organization` are correct
+- Ensure sites have status `installed` in Forge
+- Check Traefik logs — the plugin logs every discovery decision to stdout
 
-1. Check that your API token is valid
-2. Verify server names match exactly (case-sensitive)
-3. Ensure sites have status "installed"
-4. Check Traefik logs for API errors
+**Routes created but traffic not flowing**
+- Verify the server's private IP is reachable from your Traefik host
+- Check that the backend is listening on the expected port
 
-### Routes created but traffic not flowing
+**Wrong IP being used**
+- The plugin prefers `private_ip_address` over `ip_address` from Forge
+- Override with a `traefik:upstream-host=` tag on the server, or a `serverMappings` entry
 
-1. Verify the `upstreamHost` IPs are reachable from Traefik
-2. Check that the backend servers are listening on the specified ports
-3. Ensure DNS is resolving the domain names to your Traefik instance
+**Wildcard subdomains not matching**
+- Requires Traefik v3 — `HostRegexp` syntax changed between v2 and v3
+- Check that `allow_wildcard_subdomains` is enabled on the domain in Forge
 
-### Poll interval too short
+**Reverb router on wrong port**
+- Use `traefik:reverb-port=NNNN` tag on the site to override
+- Or verify the port in Forge under the site's Reverb integration settings
 
-**Error:** "poll interval must be at least 10s"
-
-**Solution:** Set `pollInterval` to at least "10s". The minimum is enforced to:
-- Avoid overwhelming the Forge API
-- Prevent rate limiting issues
-- Reduce unnecessary load on both systems
-
-Recommended values:
-- Development: "10s" (minimum)
-- Production: "30s" to "60s"
-
-### API rate limiting
-
-If you're polling very frequently with many servers/sites, you may hit Forge's rate limits. Increase `pollInterval` if this occurs.
+**Poll interval error**
+- Minimum is `10s`. Recommended `30s`–`60s` in production.
 
 ## Development
 
-### Building
-
 ```bash
-make vendor
+# Run tests
+go test ./...
+
+# Build
+go build ./...
+
+# Preview against live Forge
+FORGE_TOKEN=xxx FORGE_ORG=my-org go run ./cmd/verify
 ```
-
-### Testing
-
-```bash
-make test
-```
-
-### Linting
-
-```bash
-make lint
-```
-
-## Publishing to Traefik Plugin Catalog
-
-To publish this plugin to the official Traefik Plugin Catalog:
-
-1. Ensure the repository has the `traefik-plugin` topic
-2. Ensure `.traefik.yml` is present and valid
-3. Tag a release: `git tag v1.0.0 && git push --tags`
-4. Wait for the Plugin Catalog to discover your plugin (runs daily)
 
 ## License
 
-See LICENSE file.
-
-## Contributing
-
-Contributions welcome! Please open an issue or pull request.
-
-## API Reference
-
-This plugin uses the Laravel Forge API v2:
-- Base URL: `https://forge.laravel.com/api`
-- Authentication: Bearer token (OAuth2)
-- Format: JSON:API specification
-- Endpoints used:
-  - `GET /orgs/{organization}/servers` - List all servers in organization
-  - `GET /orgs/{organization}/servers/{serverId}/sites` - List sites on a server
-
-The v2 API uses the JSON:API specification for structured, consistent responses with support for pagination, filtering, sorting, and including related resources.
+See [LICENSE](LICENSE).

@@ -1,115 +1,85 @@
-# Example Traefik configuration for Laravel Forge Provider Plugin
-# Copy this file to traefik.yml and customize for your setup
+# Example Traefik v3 static configuration for traefik-laravel-forge
+# Copy to traefik.yml and adjust for your environment.
 
-# Entry points - where Traefik listens for incoming traffic
 entryPoints:
   web:
-    address: :80
+    address: ":80"
   websecure:
-    address: :443
+    address: ":443"
 
-# Enable access logs (optional)
-accessLog: {}
+# --- Certificate resolver ---
+# Shown here with Cloudflare DNS challenge. Adjust for your provider.
+# The resolver name ("cloudflare") must match defaultCertResolver in the plugin config.
+certificatesResolvers:
+  cloudflare:
+    acme:
+      email: you@example.com
+      storage: /etc/traefik/acme/acme.json
+      dnsChallenge:
+        provider: cloudflare
+        propagation:
+          delayBeforeChecks: 10
 
-# Set log level - use DEBUG for troubleshooting
+# Uncomment to enable the Traefik dashboard on a separate port
+# api:
+#   dashboard: true
+# entryPoints:
+#   dashboard:
+#     address: ":8081"
+
 log:
-  level: INFO  # Change to DEBUG to see plugin activity
+  level: INFO  # Use DEBUG to see plugin discovery decisions
 
-# Enable the Traefik dashboard (optional)
-api:
-  dashboard: true
-  insecure: true  # Don't use in production without proper security
-
-# Experimental features - required for plugins
-experimental:
-  localPlugins:
-    forge:
-      moduleName: github.com/wickedsick/traefik-laravel-forge
-
-# Provider configuration
+# --- File provider ---
+# Keep this for static configs that the plugin doesn't manage:
+# vanity domain redirects, dashboard config, shared middleware definitions.
 providers:
-  # Laravel Forge Provider Plugin
-  plugin:
-    forge:
-      # Your Laravel Forge API token
-      # Get it from: https://forge.laravel.com/user/profile#/api
-      apiToken: "your-forge-api-token-here"
-
-      # Your Forge organization slug
-      # Find this in the URL when logged into Forge: forge.laravel.com/orgs/{organization}
-      organization: "your-organization-slug"
-
-      # How often to poll Forge for changes (minimum: 10s, recommended: 30s)
-      pollInterval: "30s"
-
-      # Default certificate resolver for TLS (optional)
-      # If set, all sites will automatically get TLS enabled with this resolver
-      # Can be overridden per-site using tags: "traefik:cert-resolver=myresolver"
-      defaultCertResolver: "letsencrypt"
-
-      # Default sites enabled (optional, default: true)
-      # Set to false for opt-in mode where only tagged sites are enabled
-      # Override per-site with tag: "traefik:enabled=true" or "traefik:enabled=false"
-      defaultSitesEnabled: true
-
-      # Map Forge servers to load balancer backends
-      # Only servers listed here will have their sites exposed
-      serverMappings:
-        # Example: Map forge server with explicit IP and port
-        - forgeServerName: "app01"
-          upstreamHost: "10.0.1.10"
-          upstreamPort: 80
-          traefik: "lb01"
-
-        # Example: Auto-detect IP from Forge (uses private_ip_address if available)
-        # When upstreamHost is omitted, the plugin will use the private IP from Forge
-        - forgeServerName: "app02"
-          upstreamPort: 8080  # Optional: defaults to 80
-          traefik: "lb01"
-
-        # Example: Another server with default port (80)
-        - forgeServerName: "app03"
-          upstreamHost: "10.0.2.10"
-          traefik: "lb02"
-
-  # File provider for additional static routes (optional)
   file:
-    filename: /path/to/dynamic-config.yml
+    directory: /etc/traefik/conf.d
     watch: true
 
-# TLS configuration (recommended for production)
-# Define certificate resolvers that can be used by the Forge provider
-certificatesResolvers:
-  letsencrypt:
-    acme:
-      email: your-email@example.com
-      storage: /path/to/acme.json
-      httpChallenge:
-        entryPoint: web
+  # --- Plugin config ---
+  plugin:
+    forge:
+      # Required
+      apiToken: "your-forge-api-token"       # forge.laravel.com/user/profile#/api
+      organization: "your-org-slug"          # forge.laravel.com/orgs/{slug}
 
-  # Optional: Additional resolver for staging/testing
-  # letsencrypt-staging:
-  #   acme:
-  #     email: your-email@example.com
-  #     storage: /path/to/acme-staging.json
-  #     caServer: https://acme-staging-v02.api.letsencrypt.org/directory
-  #     httpChallenge:
-  #       entryPoint: web
+      # How often to check Forge for changes. Minimum 10s.
+      pollInterval: "30s"
 
-# Per-site Configuration via Forge Tags
-# =========================================
-# Add tags to your sites in Forge to control behavior:
-#
-# Site Enable/Disable:
-# - "traefik:enabled=true" - Enable this site (or false to disable)
-#
-# TLS Configuration:
-# - "traefik:cert-resolver=letsencrypt" - Use specific cert resolver
-# - "traefik:tls=true" - Enable TLS for this site
-# - "traefik:tls=false" - Disable TLS for this site
-#
-# Examples:
-# 1. Opt-in mode: Set defaultSitesEnabled: false, then tag "traefik:enabled=true" on allowed sites
-# 2. Temporarily disable: Tag "traefik:enabled=false" on a site
-# 3. Use staging certs: Tag "traefik:cert-resolver=letsencrypt-staging"
-# 4. Disable TLS for dev: Tag "traefik:tls=false"
+      # Set a cert resolver to enable TLS for all sites automatically.
+      defaultCertResolver: "cloudflare"
+
+      # Generate HTTP→HTTPS redirect routers.
+      # When true and redirectMiddleware is empty, the plugin creates
+      # a forge-https-redirect middleware automatically.
+      httpRedirect: true
+
+      # Optional: reference an externally-defined redirect middleware instead.
+      # Useful if you want to share it with static config routers.
+      # redirectMiddleware: "https-redirect"
+
+      # Set to false for opt-in mode: only sites tagged traefik:enabled=true are routed.
+      # defaultSitesEnabled: true
+
+      # Optional: override IP or port for specific servers.
+      # Usually not needed — the plugin auto-detects private IPs from Forge.
+      # serverMappings:
+      #   - forgeServerName: "app01"
+      #     upstreamHost: "10.0.1.10"
+      #     upstreamPort: 80
+
+# --- Plugin installation ---
+# For production (Traefik Plugin Catalog):
+experimental:
+  plugins:
+    forge:
+      moduleName: github.com/wickedsick/traefik-laravel-forge
+      version: v1.0.0
+
+# For local/development mode (clone the repo first):
+# experimental:
+#   localPlugins:
+#     forge:
+#       moduleName: github.com/wickedsick/traefik-laravel-forge

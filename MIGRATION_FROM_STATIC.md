@@ -1,75 +1,59 @@
-# Migration from Static Configs to Plugin
+# Migrating from static config
 
-This document shows how to reproduce your current static Traefik configurations using the Laravel Forge provider plugin.
+If you're currently managing Traefik routers with static TOML or YAML files, this guide walks through replacing them with the plugin.
 
-## Your Current Static Configs
+## What the plugin replaces
 
-### perfectcellar.net.toml
+The plugin auto-generates routers for sites managed in Forge. A typical static config file like this:
+
 ```toml
-# Main router (HTTPS)
-[http.routers.perfectcellar-net]
-  rule = "Host(`perfectcellar.net`)"
-  service = "perfectcellar-net-service"
+# /etc/traefik/conf.d/myapp.com.toml
+[http.routers.myapp]
+  rule = "Host(`myapp.com`)"
+  service = "myapp-service"
   entryPoints = ["websecure"]
-  [http.routers.perfectcellar-net.tls]
+  [http.routers.myapp.tls]
     certResolver = "cloudflare"
 
-# HTTP router for HTTP->HTTPS redirect
-[http.routers.perfectcellar-net-http]
-  rule = "Host(`perfectcellar.net`)"
+[http.routers.myapp-http]
+  rule = "Host(`myapp.com`)"
   entryPoints = ["web"]
   middlewares = ["https-redirect"]
-  service = "perfectcellar-net-service"
+  service = "myapp-service"
 
-# Backend service
-[http.services.perfectcellar-net-service]
-  [http.services.perfectcellar-net-service.loadBalancer]
-    [[http.services.perfectcellar-net-service.loadBalancer.servers]]
-      url = "http://192.168.5.101:80"
+[http.services.myapp-service]
+  [http.services.myapp-service.loadBalancer]
+    [[http.services.myapp-service.loadBalancer.servers]]
+      url = "http://192.168.1.10:80"
 ```
 
-### ws.perfectcellar.net.toml
-```toml
-# WebSocket router (HTTPS)
-[http.routers.ws-perfectcellar-net]
-  rule = "Host(`ws.perfectcellar.net`)"
-  service = "ws-perfectcellar-net-service"
-  entryPoints = ["websecure"]
-  [http.routers.ws-perfectcellar-net.tls]
-    certResolver = "cloudflare"
+…becomes zero config. The plugin generates an equivalent router automatically as long as `myapp.com` is a site on a Forge-managed server.
 
-# Backend service (different port!)
-[http.services.ws-perfectcellar-net-service]
-  [http.services.ws-perfectcellar-net-service.loadBalancer]
-    [[http.services.ws-perfectcellar-net-service.loadBalancer.servers]]
-      url = "http://192.168.5.101:8080"
-```
+## What stays in static config
 
----
+Not everything belongs in the plugin. Keep static files for:
 
-## Migration to Plugin
+| Use case | Why |
+|----------|-----|
+| Vanity domain redirects | These aren't Forge sites — they're pure routing policy |
+| Traefik API dashboard | Unrelated to Forge |
+| Shared middleware definitions | Define once, reference by name from multiple routers |
+| WebSocket routes with non-standard ports not in Forge | If the port isn't in Forge's Reverb integration, use static config |
 
-### Step 1: Initial Traefik Configuration
+## Migration steps
 
-Replace your static `.toml` files with this plugin configuration:
+### 1. Audit your static files
+
+For each router in your static config, ask: **is this domain a site in Forge?**
+
+- Yes → the plugin will generate it; delete the static file after verifying
+- No → keep it as a static file
+
+### 2. Install the plugin
+
+Add to `traefik.yml`:
 
 ```yaml
-# traefik.yml
-entryPoints:
-  web:
-    address: :80
-  websecure:
-    address: :443
-
-# Define the https-redirect middleware
-http:
-  middlewares:
-    https-redirect:
-      redirectScheme:
-        scheme: https
-        permanent: true
-
-# Plugin configuration
 experimental:
   plugins:
     forge:
@@ -81,323 +65,75 @@ providers:
     forge:
       apiToken: "your-forge-api-token"
       organization: "your-org-slug"
-      pollInterval: "30s"
-      defaultCertResolver: "cloudflare"
-      httpRedirect: true                    # Enable HTTP->HTTPS redirect
-      redirectMiddleware: "https-redirect"  # Use the middleware defined above
-      serverMappings: []                    # Empty! Everything via tags
-
-# Certificate resolver
-certificatesResolvers:
-  cloudflare:
-    acme:
-      email: your-email@example.com
-      storage: /acme.json
-      dnsChallenge:
-        provider: cloudflare
-        resolvers:
-          - "1.1.1.1:53"
-          - "8.8.8.8:53"
-```
-
-### Step 2: Configure Forge Server
-
-Assuming both sites are on the same server (server IP: 192.168.5.101):
-
-**Server Tags in Forge:**
-```
-traefik:upstream-host=192.168.5.101
-```
-
-That's it for the server! The plugin will auto-detect and use this IP.
-
-### Step 3: Configure Forge Sites
-
-**Site: perfectcellar.net**
-- No tags needed!
-- Inherits `defaultCertResolver: cloudflare`
-- Gets HTTP redirect automatically (`httpRedirect: true`)
-
-**Site: ws.perfectcellar.net**
-Add this tag (custom port):
-```
-traefik:port=8080
-```
-
-### What Gets Generated
-
-The plugin will automatically create:
-
-**For perfectcellar.net:**
-```toml
-[http.routers.forge-{server}-{id}]
-  rule = "Host(`perfectcellar.net`)"
-  service = "forge-{server}-{id}-service"
-  entryPoints = ["websecure"]
-  [http.routers.forge-{server}-{id}.tls]
-    certResolver = "cloudflare"
-
-[http.routers.forge-{server}-{id}-http]
-  rule = "Host(`perfectcellar.net`)"
-  entryPoints = ["web"]
-  middlewares = ["https-redirect"]
-  service = "forge-{server}-{id}-service"
-
-[http.services.forge-{server}-{id}-service]
-  [http.services.forge-{server}-{id}-service.loadBalancer]
-    passHostHeader = true
-    [[http.services.forge-{server}-{id}-service.loadBalancer.servers]]
-      url = "http://192.168.5.101:80"
-```
-
-**For ws.perfectcellar.net:**
-```toml
-[http.routers.forge-{server}-{id}]
-  rule = "Host(`ws.perfectcellar.net`)"
-  service = "forge-{server}-{id}-service"
-  entryPoints = ["websecure"]
-  [http.routers.forge-{server}-{id}.tls]
-    certResolver = "cloudflare"
-
-[http.routers.forge-{server}-{id}-http]
-  rule = "Host(`ws.perfectcellar.net`)"
-  entryPoints = ["web"]
-  middlewares = ["https-redirect"]
-  service = "forge-{server}-{id}-service"
-
-[http.services.forge-{server}-{id}-service]
-  [http.services.forge-{server}-{id}-service.loadBalancer]
-    passHostHeader = true
-    [[http.services.forge-{server}-{id}-service.loadBalancer.servers]]
-      url = "http://192.168.5.101:8080"  # Custom port from tag!
-```
-
-## Comparison: Before vs After
-
-### Before (Static Files)
-```
-perfectcellar.net.toml      - 20 lines
-ws.perfectcellar.net.toml   - 12 lines
-Total: 2 files, 32 lines
-```
-Every new site = new `.toml` file
-
-### After (Plugin)
-```yaml
-# traefik.yml (one time setup)
-providers:
-  plugin:
-    forge:
-      apiToken: "..."
-      organization: "..."
-      defaultCertResolver: "cloudflare"
+      defaultCertResolver: "cloudflare"   # match your existing cert resolver name
       httpRedirect: true
-      redirectMiddleware: "https-redirect"
-      serverMappings: []
 ```
 
-**Forge Tags:**
-- Server: `traefik:upstream-host=192.168.5.101`
-- ws.perfectcellar.net: `traefik:port=8080`
-- perfectcellar.net: (no tags needed)
+If your static config references an `https-redirect` middleware defined in a shared file, either:
+- Set `redirectMiddleware: "https-redirect"` and keep the shared file, **or**
+- Omit `redirectMiddleware` — the plugin creates `forge-https-redirect` automatically
 
-Every new site = **automatically configured!**
+### 3. Verify before switching
 
-## Feature Mapping
-
-| Static Config Feature | Plugin Support | How |
-|----------------------|----------------|-----|
-| Host rule | ✅ Yes | Automatic from site name |
-| Entry points | ✅ Yes | Auto: `websecure` for TLS, `web` for non-TLS |
-| TLS cert resolver | ✅ Yes | `defaultCertResolver` or tag `traefik:cert-resolver=cloudflare` |
-| Service URL | ✅ Yes | From server IP + optional site port tag |
-| HTTP redirect | ✅ Yes | `httpRedirect: true` + `redirectMiddleware` config |
-| Custom port per site | ✅ Yes | Tag: `traefik:port=8080` |
-| Middlewares | ✅ Partial | Only redirect middleware currently |
-
-## Advanced Tag Options
-
-For even more control, you can use tags:
-
-### Override Entry Points
-If you wanted only HTTPS (no HTTP redirect) for a specific site:
-```
-traefik:entrypoints=websecure
-traefik:http-redirect=false
-```
-
-### Different Cert Resolver
-For testing a site with staging certs:
-```
-traefik:cert-resolver=letsencrypt-staging
-```
-
-### Disable TLS for Dev Site
-```
-traefik:tls=false
-```
-
-## Complete Reproduction Example
-
-### Traefik Configuration
-```yaml
-# traefik.yml
-entryPoints:
-  web:
-    address: :80
-  websecure:
-    address: :443
-
-http:
-  middlewares:
-    https-redirect:
-      redirectScheme:
-        scheme: https
-        permanent: true
-
-experimental:
-  plugins:
-    forge:
-      moduleName: github.com/wickedsick/traefik-laravel-forge
-      version: v1.0.0
-
-providers:
-  plugin:
-    forge:
-      apiToken: "your-forge-api-token"
-      organization: "your-org-slug"
-      pollInterval: "30s"
-      defaultCertResolver: "cloudflare"
-      httpRedirect: true
-      redirectMiddleware: "https-redirect"
-      serverMappings: []
-
-certificatesResolvers:
-  cloudflare:
-    acme:
-      email: your-email@example.com
-      storage: /acme.json
-      dnsChallenge:
-        provider: cloudflare
-        resolvers:
-          - "1.1.1.1:53"
-          - "8.8.8.8:53"
-```
-
-### Forge Tags
-
-**Server (e.g., "app01"):**
-```
-traefik:upstream-host=192.168.5.101
-```
-
-**Site: perfectcellar.net**
-- No tags needed (uses defaults)
-
-**Site: ws.perfectcellar.net**
-```
-traefik:port=8080
-```
-
-### Result
-
-**Identical behavior to your static configs!**
-
-Plus you get:
-- ✅ Automatic discovery of new sites
-- ✅ No manual `.toml` file creation
-- ✅ Changes apply in 30s (no restart)
-- ✅ Manage via Forge UI
-
-## New Site Workflow Comparison
-
-### Before (Static)
-1. Create site in Forge
-2. SSH to Traefik server
-3. Create new `.toml` file
-4. Copy/paste config
-5. Update host, URL, cert resolver
-6. Save file
-7. Restart Traefik (or wait for file watcher)
-
-### After (Plugin)
-1. Create site in Forge
-2. (Optional) Add tags if custom port needed
-3. Done! Routed in 30s
-
-**~90% less work per site!**
-
-## Rollback Plan
-
-If you need to rollback to static configs:
-
-1. Keep your static `.toml` files
-2. Disable the plugin in Traefik config
-3. Re-enable file provider
-4. Restart Traefik
-
-The static files and plugin can coexist during migration.
-
-## Migration Strategy
-
-### Recommended Approach: Gradual
-
-1. **Week 1**: Add plugin alongside static configs
-   - Both active simultaneously
-   - No changes to existing sites
-   - Test with one new site via plugin
-
-2. **Week 2**: Move some sites to plugin
-   - Add server tags in Forge
-   - Remove corresponding `.toml` files
-   - Verify routing works
-
-3. **Week 3**: Migrate remaining sites
-   - All sites now via plugin
-   - Delete static config files
-   - Update documentation
-
-### Aggressive Approach: All at Once
-
-1. Add plugin config
-2. Add server tags
-3. Add site port tags (ws.perfectcellar.net)
-4. Delete static `.toml` files
-5. Restart Traefik
-6. Verify all sites working
-
-## Verification
-
-After migration, verify each site:
+Use the verify tool to preview what the plugin would generate and compare it against your live config:
 
 ```bash
-# Check HTTPS works
-curl -I https://perfectcellar.net
-
-# Check HTTP redirects
-curl -I http://perfectcellar.net  # Should redirect to HTTPS
-
-# Check WebSocket site
-curl -I https://ws.perfectcellar.net
-
-# Check Traefik dashboard
-# Navigate to dashboard and verify routers exist
+FORGE_TOKEN=xxx FORGE_ORG=my-org go run ./cmd/verify \
+  --cert-resolver cloudflare \
+  --http-redirect \
+  --compare /etc/traefik/conf.d/myapp.com.toml
 ```
 
-## Summary
+The output shows three sections:
+- **MISSING** — hosts in your static file not covered by the plugin (check if the site exists in Forge)
+- **NEW** — Forge sites not yet in your static config (new routes that will appear)
+- **MATCHED** — hosts covered by both
 
-**Can the plugin reproduce your configs?** ✅ **YES, completely!**
+### 4. Handle domain aliases
 
-**Required:**
-- Global: `httpRedirect: true` + `redirectMiddleware`
-- Server tag: `traefik:upstream-host=192.168.5.101`
-- Site tag (ws.perfectcellar.net): `traefik:port=8080`
+If your static config has multi-host rules like:
 
-**Benefits over static:**
-- Automatic site discovery
-- No manual file creation
-- No Traefik restarts for new sites
-- Manage via Forge UI
-- Less maintenance
+```toml
+rule = "Host(`myapp.com`) || Host(`app.myapp.com`)"
+```
 
-**The plugin can fully replace your static configs!** 🎉
+Check whether these are already registered as domain aliases in Forge (under Sites → your site → Domains). If so, the plugin picks them up automatically.
+
+If `myapp.com` has `allow_wildcard_subdomains` enabled in Forge, subdomains are covered automatically via a `HostRegexp` rule — no extra config needed.
+
+For any alias that isn't in Forge and you don't want to add there, use the `traefik:aliases=` tag on the site.
+
+### 5. Handle Reverb WebSocket routes
+
+If you have static entries for Reverb/WebSocket domains (e.g. `ws.myapp.com`), check whether the domain is registered in Forge's Reverb integration (Sites → your site → Integrations → Reverb).
+
+If it is, the plugin creates the Reverb router automatically with the correct port. Delete the static file.
+
+If the port in Forge is wrong, use the `traefik:reverb-port=` tag on the site to override it.
+
+### 6. Remove static files gradually
+
+Once you've verified coverage, remove static config files one at a time and confirm routing still works after each removal. Traefik's file provider and the plugin coexist — there's no need to cut over all at once.
+
+## Example: before and after
+
+**Before** (4 static TOML files):
+
+```
+conf.d/
+  myapp.com.toml          # main router + HTTP redirect
+  ws.myapp.com.toml       # Reverb WebSocket router
+  staging.myapp.com.toml  # staging site
+  vanity-old-brand.toml   # old domain redirect (keep this one)
+```
+
+**After** (1 static file, everything else via plugin):
+
+```
+conf.d/
+  vanity-old-brand.toml   # stays — pure redirect, not a Forge site
+
+traefik.yml               # plugin config replaces the other three files
+```
+
+`myapp.com` and `ws.myapp.com` are generated from Forge. `staging.myapp.com` is generated if it's a Forge site. `vanity-old-brand.toml` stays because it's a redirect, not an app.
