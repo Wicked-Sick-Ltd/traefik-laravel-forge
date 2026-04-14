@@ -41,9 +41,12 @@ providers:
   # --- Plugin config ---
   plugin:
     forge:
-      # Required
-      apiToken: "your-forge-api-token"       # forge.laravel.com/user/profile#/api
-      organization: "your-org-slug"          # forge.laravel.com/orgs/{slug}
+      # Sensitive values — read from environment variables.
+      # Traefik expands $VAR / ${VAR} in this file before passing values to the plugin,
+      # so these are never stored in plain text on disk.
+      # Add them to your .env file (or systemd EnvironmentFile, Docker secrets, etc.)
+      apiToken: "${FORGE_API_TOKEN}"         # forge.laravel.com/user/profile#/api
+      organization: "${FORGE_ORG_SLUG}"      # forge.laravel.com/orgs/{slug}
 
       # How often to check Forge for changes. Minimum 10s.
       pollInterval: "30s"

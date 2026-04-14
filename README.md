@@ -102,11 +102,13 @@ experimental:
 providers:
   plugin:
     forge:
-      apiToken: "your-forge-api-token"
-      organization: "your-org-slug"
+      apiToken: "${FORGE_API_TOKEN}"
+      organization: "${FORGE_ORG_SLUG}"
       defaultCertResolver: "cloudflare"
       httpRedirect: true
 ```
+
+Traefik expands `$VAR` / `${VAR}` references in the static config file before passing values to the plugin, so sensitive values never need to be stored in plain text. Add them to your `.env` file (or systemd `EnvironmentFile`, Docker secrets, etc.).
 
 That's all that's needed. The plugin discovers your servers and sites automatically.
 
@@ -114,8 +116,8 @@ That's all that's needed. The plugin discovers your servers and sites automatica
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `apiToken` | string | **required** | Forge API token — generate at forge.laravel.com/user/profile#/api |
-| `organization` | string | **required** | Forge organisation slug — from the URL: `forge.laravel.com/orgs/{slug}` |
+| `apiToken` | string | **required** | Forge API token — generate at forge.laravel.com/user/profile#/api. Use `${ENV_VAR}` to avoid storing in plain text |
+| `organization` | string | **required** | Forge organisation slug — from the URL: `forge.laravel.com/orgs/{slug}`. Can also use `${ENV_VAR}` |
 | `pollInterval` | string | `"30s"` | How often to poll Forge. Minimum `"10s"` |
 | `defaultCertResolver` | string | `""` | Cert resolver name to use for all sites. Enables TLS when set |
 | `defaultSitesEnabled` | bool | `true` | Set to `false` for opt-in mode: only sites with `traefik:enabled` tag are routed |
