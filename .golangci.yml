@@ -18,7 +18,7 @@ linters:
     - paralleltest
     - nlreturn
     - wsl
-    - wsl_v5
+    - wsl_v5      # same rules as wsl, already disabled
     - exhaustive
     - exhaustruct
     - wrapcheck
@@ -29,12 +29,12 @@ linters:
     - varnamelen
     - funcorder
     - nilnil      # fetchRaw intentionally returns nil, nil for "not found, not an error"
-    - noinlineerr
+    - noinlineerr # style preference — inline err checks are idiomatic in this codebase
     - err113      # our simple validation errors don't need package-level vars
     - gocognit    # generateConfiguration is inherently complex
     - nestif      # nesting is inherent in the provider logic
     - perfsprint  # micro-optimisation not relevant here
-    - modernize   # not all suggestions apply to Go 1.19
+    - modernize   # suggestions like interface{}→any don't apply to Go 1.19 target
     - nosprintfhostport  # we include "http://" prefix so net.JoinHostPort doesn't apply cleanly
     - errchkjson         # enc.Encode result is already explicitly discarded with _
     - gocyclo            # generateConfiguration is a large provider function; complexity is expected
