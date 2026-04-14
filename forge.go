@@ -92,6 +92,20 @@ type ForgeSiteAttributes struct {
 	Tags   []string `json:"-"` // Populated from relationships+included after decode
 }
 
+// ForgeReverbIntegration represents the Reverb integration config for a site.
+type ForgeReverbIntegration struct {
+	Enabled bool    `json:"enabled"`
+	Host    string  `json:"host"`
+	Port    int     `json:"port"`
+}
+
+// ForgeReverbResponse is the response from /integrations/reverb.
+type ForgeReverbResponse struct {
+	Data struct {
+		Attributes ForgeReverbIntegration `json:"attributes"`
+	} `json:"data"`
+}
+
 // ForgeDomain represents a domain record attached to a Forge site.
 // The /domains endpoint returns these (type: "domainRecords").
 type ForgeDomain struct {
@@ -386,6 +400,24 @@ func (p *Provider) fetchForgeDomains(serverID, siteID string) ([]ForgeDomain, er
 	return resp.Data, nil
 }
 
+// fetchReverbIntegration retrieves the Reverb integration config for a site.
+// Returns nil if Reverb is not enabled or the endpoint is unavailable.
+func (p *Provider) fetchReverbIntegration(serverID, siteID string) (*ForgeReverbIntegration, error) {
+	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s/integrations/reverb", p.organization, serverID, siteID)
+	raw, err := p.fetchRaw(url)
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	var resp ForgeReverbResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("failed to decode reverb response: %w", err)
+	}
+	if !resp.Data.Attributes.Enabled || resp.Data.Attributes.Host == "" || resp.Data.Attributes.Port == 0 {
+		return nil, nil
+	}
+	return &resp.Data.Attributes, nil
+}
+
 // ParseTagConfig parses a tag for configuration directives.
 // Format: "traefik:key=value" or "traefik:flag"
 // Returns key, value, and whether it's a traefik tag.
@@ -613,6 +645,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			httpRedirect := p.httpRedirect
 			var entryPoints []string
 			var tagAliases []string // extra hosts from traefik:aliases= tag
+			reverbPortOverride := 0 // traefik:reverb-port= tag
 
 			for _, tag := range site.Attributes.Tags {
 				key, value, isTraefikTag := ParseTagConfig(tag)
@@ -651,6 +684,10 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 						}
 					}
 					os.Stdout.WriteString(fmt.Sprintf("Site '%s' tag aliases: %v\n", site.Attributes.Name, tagAliases))
+				case "reverb-port":
+					if n, err := fmt.Sscanf(value, "%d", &reverbPortOverride); err == nil && n == 1 {
+						os.Stdout.WriteString(fmt.Sprintf("Site '%s' reverb port overridden to %d via tag\n", site.Attributes.Name, reverbPortOverride))
+					}
 				}
 			}
 
@@ -660,27 +697,41 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				continue
 			}
 
-			// Fetch domain records to find the real hostnames for this site.
+			// Fetch domain records and reverb integration in parallel context.
 			domains, err := p.fetchForgeDomains(server.ID, site.ID)
 			if err != nil {
 				os.Stderr.WriteString(fmt.Sprintf("Failed to fetch domains for site '%s': %v, falling back to site name\n", site.Attributes.Name, err))
 			}
 
-			// Collect primary/alias domain names; separate out reverb domains.
-			var mainHosts []string    // used in the primary Host() rule
-			var reverbHosts []string  // get their own router on reverbPort
+			reverb, err := p.fetchReverbIntegration(server.ID, site.ID)
+			if err != nil {
+				os.Stderr.WriteString(fmt.Sprintf("Failed to fetch reverb integration for site '%s': %v\n", site.Attributes.Name, err))
+			}
 
-			if len(domains) > 0 {
-				for _, d := range domains {
-					if d.Attributes.Status != "enabled" {
-						continue
-					}
-					switch d.Attributes.DomainType {
-					case "primary", "alias":
-						mainHosts = append(mainHosts, d.Attributes.Name)
-					case "reverb":
-						reverbHosts = append(reverbHosts, d.Attributes.Name)
-					}
+			// reverbHost is the authoritative reverb hostname from the integration.
+			// Domains matching this host are routed to the reverb port instead of the main backend.
+			reverbHost := ""
+			reverbPort := 0
+			if reverb != nil {
+				reverbHost = reverb.Host
+				reverbPort = reverb.Port
+			}
+			if reverbPortOverride > 0 {
+				reverbPort = reverbPortOverride
+			}
+
+			// Separate domain records into main hosts and reverb host.
+			var mainHosts []string
+			var reverbHosts []string
+
+			for _, d := range domains {
+				if d.Attributes.Status != "enabled" {
+					continue
+				}
+				if reverbHost != "" && d.Attributes.Name == reverbHost {
+					reverbHosts = append(reverbHosts, d.Attributes.Name)
+				} else {
+					mainHosts = append(mainHosts, d.Attributes.Name)
 				}
 			}
 
@@ -764,9 +815,8 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			}
 			os.Stdout.WriteString(fmt.Sprintf("Created router for site '%s' hosts=%v -> %s (%s)\n", site.Attributes.Name, mainHosts, siteBackendURL, tlsInfo))
 
-			// Create separate routers for Reverb (WebSocket) domains on port 8080
-			if len(reverbHosts) > 0 {
-				reverbPort := 8080
+			// Create separate routers for Reverb (WebSocket) domains
+			if len(reverbHosts) > 0 && reverbPort > 0 {
 				reverbServiceName := fmt.Sprintf("%s-reverb-service", routerName)
 				reverbBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, reverbPort)
 				reverbRule := buildHostRule(reverbHosts)
@@ -826,11 +876,11 @@ func (p *Provider) DumpRaw() ([]byte, error) {
 	}
 
 	type siteDump struct {
-		ServerID   string          `json:"server_id"`
-		ServerName string          `json:"server_name"`
-		SitesList  json.RawMessage `json:"sites_list"`
-		SiteDetail []json.RawMessage `json:"site_detail"`
-		Aliases    []json.RawMessage `json:"aliases"`
+		ServerID   string            `json:"server_id"`
+		ServerName string            `json:"server_name"`
+		SitesList  json.RawMessage   `json:"sites_list"`
+		Domains    []json.RawMessage `json:"domains"`
+		Reverb     []json.RawMessage `json:"reverb"`
 	}
 	var siteDumps []siteDump
 
@@ -846,25 +896,16 @@ func (p *Provider) DumpRaw() ([]byte, error) {
 			SitesList:  raw,
 		}
 
-		// For each site, fetch the individual detail endpoint and the aliases endpoint.
 		for _, site := range sites {
-			detail, _ := p.fetchRaw(fmt.Sprintf(
-				"https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s",
-				p.organization, server.ID, site.ID,
-			))
-			if detail != nil {
-				dump.SiteDetail = append(dump.SiteDetail, detail)
+			base := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s", p.organization, server.ID, site.ID)
+
+			if d, _ := p.fetchRaw(base + "/domains"); d != nil {
+				dump.Domains = append(dump.Domains, d)
 			}
 
-			// Try several candidate endpoints for custom domains/aliases.
-			for _, path := range []string{"aliases", "domains", "custom-domains"} {
-				aliasRaw, _ := p.fetchRaw(fmt.Sprintf(
-					"https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s/%s",
-					p.organization, server.ID, site.ID, path,
-				))
-				if aliasRaw != nil {
-					dump.Aliases = append(dump.Aliases, aliasRaw)
-				}
+			// Fetch Reverb integration config.
+			if r, _ := p.fetchRaw(base + "/integrations/reverb"); r != nil {
+				dump.Reverb = append(dump.Reverb, r)
 			}
 		}
 
