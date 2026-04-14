@@ -2,6 +2,8 @@
 
 A [Traefik](https://traefik.io) provider plugin that automatically generates HTTP routers from your [Laravel Forge](https://forge.laravel.com) sites. Add a site to Forge and it appears in Traefik within 30 seconds — no config file edits, no restarts.
 
+**Docs:** [Tag Configuration](TAG_CONFIGURATION.md) · [Migrating from static config](MIGRATION_FROM_STATIC.md)
+
 ## Requirements
 
 - Traefik v3
