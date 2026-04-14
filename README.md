@@ -4,6 +4,25 @@ A [Traefik](https://traefik.io) provider plugin that automatically generates HTT
 
 **Docs:** [Tag Configuration](TAG_CONFIGURATION.md) · [Migrating from static config](MIGRATION_FROM_STATIC.md)
 
+## Contents
+
+- [Requirements](#requirements)
+- [How it works](#how-it-works)
+- [Installation](#installation)
+- [Minimal configuration](#minimal-configuration)
+- [Plugin configuration reference](#plugin-configuration-reference)
+- [Forge tags](#forge-tags)
+  - [Site tags](#site-tags)
+  - [Server tags](#server-tags)
+  - [Configuration priority](#configuration-priority)
+- [Auto-discovered routing](#auto-discovered-routing)
+  - [Domains](#domains)
+  - [Reverb WebSocket](#reverb-websocket)
+- [What to keep in static config](#what-to-keep-in-static-config)
+- [Verification tool](#verification-tool)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+
 ## Requirements
 
 - Traefik v3
