@@ -721,7 +721,9 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			}
 
 			// Separate domain records into main hosts and reverb host.
+			// Track wildcard-enabled domains separately for HostRegexp rules.
 			var mainHosts []string
+			var wildcardHosts []string // domains with allow_wildcard_subdomains=true
 			var reverbHosts []string
 
 			for _, d := range domains {
@@ -732,6 +734,9 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					reverbHosts = append(reverbHosts, d.Attributes.Name)
 				} else {
 					mainHosts = append(mainHosts, d.Attributes.Name)
+					if d.Attributes.AllowWildcardSubdomains {
+						wildcardHosts = append(wildcardHosts, d.Attributes.Name)
+					}
 				}
 			}
 
@@ -763,8 +768,8 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				}
 			}
 
-			// Build Host() rule from all main hosts
-			hostRule := buildHostRule(mainHosts)
+			// Build Host() rule from all main hosts, adding HostRegexp for wildcard domains
+			hostRule := buildHostRule(mainHosts, wildcardHosts)
 
 			// Create the main router
 			router := &dynamic.Router{
@@ -819,7 +824,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			if len(reverbHosts) > 0 && reverbPort > 0 {
 				reverbServiceName := fmt.Sprintf("%s-reverb-service", routerName)
 				reverbBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, reverbPort)
-				reverbRule := buildHostRule(reverbHosts)
+				reverbRule := buildHostRule(reverbHosts, nil)
 
 				reverbRouter := &dynamic.Router{
 					EntryPoints: entryPoints,
@@ -949,11 +954,18 @@ func (p *Provider) fetchRaw(url string) (json.RawMessage, error) {
 	return json.RawMessage(body), nil
 }
 
-// buildHostRule builds a Traefik Host() rule from one or more hostnames.
-func buildHostRule(hosts []string) string {
-	parts := make([]string, len(hosts))
-	for i, h := range hosts {
-		parts[i] = fmt.Sprintf("Host(`%s`)", h)
+// buildHostRule builds a Traefik v3 routing rule from a list of exact hosts and
+// a list of wildcard-enabled hosts. Wildcard hosts get an additional HostRegexp
+// clause matching any single-level subdomain (e.g. app.bounceiq.com).
+func buildHostRule(hosts []string, wildcardHosts []string) string {
+	var parts []string
+	for _, h := range hosts {
+		parts = append(parts, fmt.Sprintf("Host(`%s`)", h))
+	}
+	for _, h := range wildcardHosts {
+		// Escape dots for use in a Go regex, then match any single-level subdomain.
+		escaped := strings.ReplaceAll(h, ".", `\.`)
+		parts = append(parts, fmt.Sprintf("HostRegexp(`^[^.]+\\.%s$`)", escaped))
 	}
 	return strings.Join(parts, " || ")
 }
