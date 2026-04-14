@@ -515,6 +515,19 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		},
 	}
 
+	// If httpRedirect is enabled without an explicit middleware name, create one.
+	// This makes common.toml unnecessary — the plugin is self-contained.
+	redirectMiddlewareName := p.redirectMiddleware
+	if p.httpRedirect && redirectMiddlewareName == "" {
+		redirectMiddlewareName = "forge-https-redirect"
+		configuration.HTTP.Middlewares[redirectMiddlewareName] = &dynamic.Middleware{
+			RedirectScheme: &dynamic.RedirectScheme{
+				Scheme:    "https",
+				Permanent: true,
+			},
+		}
+	}
+
 	// Fetch all servers from Forge
 	servers, err := p.fetchForgeServers()
 	if err != nil {
@@ -793,8 +806,8 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					Service:     serviceName,
 					Rule:        hostRule,
 				}
-				if p.redirectMiddleware != "" {
-					httpRouter.Middlewares = []string{p.redirectMiddleware}
+				if redirectMiddlewareName != "" {
+					httpRouter.Middlewares = []string{redirectMiddlewareName}
 				}
 				configuration.HTTP.Routers[httpRouterName] = httpRouter
 			}
@@ -845,8 +858,8 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 						Service:     reverbServiceName,
 						Rule:         reverbRule,
 					}
-					if p.redirectMiddleware != "" {
-						reverbHTTPRouter.Middlewares = []string{p.redirectMiddleware}
+					if redirectMiddlewareName != "" {
+						reverbHTTPRouter.Middlewares = []string{redirectMiddlewareName}
 					}
 					configuration.HTTP.Routers[fmt.Sprintf("%s-reverb-http", routerName)] = reverbHTTPRouter
 				}
