@@ -96,12 +96,11 @@ func main() {
 	// Collect generated hosts for comparison
 	generatedHosts := make(map[string]routerInfo)
 
-	fmt.Printf("%-50s %-25s %-15s %-20s\n", "ROUTER", "HOST RULE", "ENTRY POINTS", "SERVICE -> BACKEND")
-	fmt.Println(strings.Repeat("-", 115))
+	fmt.Printf("%-44s %-15s %-20s %s\n", "ROUTER", "ENTRY POINTS", "SERVICE -> BACKEND", "RULE")
+	fmt.Println(strings.Repeat("-", 120))
 
 	for _, name := range routerNames {
 		r := generated.HTTP.Routers[name]
-		host := extractHost(r.Rule)
 		eps := strings.Join(r.EntryPoints, ",")
 		svc := r.Service
 
@@ -119,9 +118,10 @@ func main() {
 			}
 		}
 
-		fmt.Printf("%-50s %-25s %-15s %s%s\n", name, host, eps, backend, tlsMark)
+		fmt.Printf("%-44s %-15s %-20s %s%s\n", name, eps, backend+tlsMark, r.Rule, "")
 
-		if host != "" {
+		// Still collect primary host for --compare
+		if host := extractHost(r.Rule); host != "" {
 			generatedHosts[host] = routerInfo{name: name, backend: backend, tls: r.TLS != nil}
 		}
 	}
