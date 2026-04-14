@@ -1,10 +1,8 @@
-package traefik_laravel_forge_test
+package traefik_laravel_forge
 
 import (
 	"context"
 	"testing"
-
-	forge "github.com/wickedsick/traefik-laravel-forge"
 )
 
 const (
@@ -13,12 +11,12 @@ const (
 )
 
 func TestNew(t *testing.T) {
-	config := forge.CreateConfig()
+	config := CreateConfig()
 	config.PollInterval = "10s" // Use minimum valid interval
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
 
-	provider, err := forge.New(context.Background(), config, "test")
+	provider, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,48 +35,48 @@ func TestNew(t *testing.T) {
 }
 
 func TestNewMissingAPIToken(t *testing.T) {
-	config := forge.CreateConfig()
+	config := CreateConfig()
 	config.PollInterval = "1s"
 	config.APIToken = "" // Missing token
 	config.Organization = testOrganization
 
-	_, err := forge.New(context.Background(), config, "test")
+	_, err := New(context.Background(), config, "test")
 	if err == nil {
 		t.Fatal("expected error for missing API token, got nil")
 	}
 }
 
 func TestNewMissingOrganization(t *testing.T) {
-	config := forge.CreateConfig()
+	config := CreateConfig()
 	config.PollInterval = "1s"
 	config.APIToken = testAPIToken
 	config.Organization = "" // Missing organization
 
-	_, err := forge.New(context.Background(), config, "test")
+	_, err := New(context.Background(), config, "test")
 	if err == nil {
 		t.Fatal("expected error for missing organization, got nil")
 	}
 }
 
 func TestNewInvalidPollInterval(t *testing.T) {
-	config := forge.CreateConfig()
+	config := CreateConfig()
 	config.PollInterval = "invalid"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
 
-	_, err := forge.New(context.Background(), config, "test")
+	_, err := New(context.Background(), config, "test")
 	if err == nil {
 		t.Fatal("expected error for invalid poll interval, got nil")
 	}
 }
 
 func TestInitInvalidPollInterval(t *testing.T) {
-	config := forge.CreateConfig()
+	config := CreateConfig()
 	config.PollInterval = "0s"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
 
-	provider, err := forge.New(context.Background(), config, "test")
+	provider, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,12 +88,12 @@ func TestInitInvalidPollInterval(t *testing.T) {
 }
 
 func TestInitPollIntervalTooShort(t *testing.T) {
-	config := forge.CreateConfig()
+	config := CreateConfig()
 	config.PollInterval = "5s" // Less than 10s minimum
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
 
-	provider, err := forge.New(context.Background(), config, "test")
+	provider, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,12 +111,12 @@ func TestInitPollIntervalTooShort(t *testing.T) {
 }
 
 func TestInitPollIntervalValid(t *testing.T) {
-	config := forge.CreateConfig()
+	config := CreateConfig()
 	config.PollInterval = "10s" // Exactly 10s - should be valid
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
 
-	provider, err := forge.New(context.Background(), config, "test")
+	provider, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +208,7 @@ func TestParseServerTags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := forge.ParseServerTags(tt.tags)
+			cfg := ParseServerTags(tt.tags)
 			if cfg.UpstreamHost != tt.wantUpstreamHost {
 				t.Errorf("UpstreamHost = %q, want %q", cfg.UpstreamHost, tt.wantUpstreamHost)
 			}
@@ -243,7 +241,7 @@ func TestParseTagConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.tag, func(t *testing.T) {
-			key, value, ok := forge.ParseTagConfig(tt.tag)
+			key, value, ok := ParseTagConfig(tt.tag)
 			if ok != tt.wantOK {
 				t.Errorf("ParseTagConfig(%q) ok = %v, want %v", tt.tag, ok, tt.wantOK)
 			}
