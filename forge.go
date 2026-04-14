@@ -676,6 +676,12 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	return configuration, nil
 }
 
+// GenerateConfiguration is the exported entry point for previewing what the plugin would produce.
+// Useful for verification and testing without running Traefik.
+func (p *Provider) GenerateConfiguration() (*dynamic.Configuration, error) {
+	return p.generateConfiguration()
+}
+
 func boolPtr(v bool) *bool {
 	return &v
 }
