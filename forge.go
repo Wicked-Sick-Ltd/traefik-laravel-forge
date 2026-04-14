@@ -657,8 +657,9 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			sitePort := upstreamPort
 			httpRedirect := p.httpRedirect
 			var entryPoints []string
-			var tagAliases []string // extra hosts from traefik:aliases= tag
-			reverbPortOverride := 0 // traefik:reverb-port= tag
+			var tagAliases []string      // extra hosts from traefik:aliases= tag
+			var tagMiddlewares []string  // extra middlewares from traefik:middlewares= tag
+			reverbPortOverride := 0      // traefik:reverb-port= tag
 
 			for _, tag := range site.Attributes.Tags {
 				key, value, isTraefikTag := ParseTagConfig(tag)
@@ -701,6 +702,13 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					if n, err := fmt.Sscanf(value, "%d", &reverbPortOverride); err == nil && n == 1 {
 						os.Stdout.WriteString(fmt.Sprintf("Site '%s' reverb port overridden to %d via tag\n", site.Attributes.Name, reverbPortOverride))
 					}
+				case "middlewares", "middleware":
+					for _, m := range strings.Split(value, ",") {
+						if m = strings.TrimSpace(m); m != "" {
+							tagMiddlewares = append(tagMiddlewares, m)
+						}
+					}
+					os.Stdout.WriteString(fmt.Sprintf("Site '%s' extra middlewares: %v\n", site.Attributes.Name, tagMiddlewares))
 				}
 			}
 
@@ -789,6 +797,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				EntryPoints: entryPoints,
 				Service:     serviceName,
 				Rule:        hostRule,
+				Middlewares: tagMiddlewares,
 			}
 			if enableTLS {
 				router.TLS = &dynamic.RouterTLSConfig{}
@@ -843,6 +852,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					EntryPoints: entryPoints,
 					Service:     reverbServiceName,
 					Rule:        reverbRule,
+					Middlewares: tagMiddlewares,
 				}
 				if enableTLS {
 					reverbRouter.TLS = &dynamic.RouterTLSConfig{}

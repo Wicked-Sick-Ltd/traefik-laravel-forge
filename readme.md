@@ -130,6 +130,7 @@ Add these to any site in Forge to control how it's routed:
 | `traefik:http-redirect` | `traefik:http-redirect=false` | Override the global `httpRedirect` setting for this site |
 | `traefik:entrypoints` | `traefik:entrypoints=websecure,web` | Override entry points (comma-separated) |
 | `traefik:aliases` | `traefik:aliases=app.example.com,www.example.com` | Add extra hostnames to the router rule (comma-separated) |
+| `traefik:middlewares` | `traefik:middlewares=my-auth,rate-limit` | Attach named Traefik middlewares to this site's router (comma-separated). Middlewares must be defined in static config. Applied to the main and Reverb routers; not the HTTP redirect router |
 | `traefik:reverb-port` | `traefik:reverb-port=8081` | Override the auto-detected Reverb WebSocket port |
 
 ### Server tags

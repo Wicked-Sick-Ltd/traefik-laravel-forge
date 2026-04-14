@@ -103,6 +103,27 @@ These are appended as `|| Host(...)` clauses to the generated rule. For subdomai
 
 ---
 
+### `traefik:middlewares`
+
+Attach one or more named Traefik middlewares to this site's router. Comma-separated. The middlewares must be defined elsewhere — either in the Traefik static config or a static dynamic config file (e.g. `conf.d/middlewares.toml`).
+
+```
+traefik:middlewares=my-auth
+traefik:middlewares=my-auth,rate-limit,headers
+```
+
+Applied to the main router and the Reverb router. Not applied to the HTTP redirect router (which only redirects — adding auth there would block the redirect).
+
+Example `conf.d/middlewares.toml`:
+```toml
+[http.middlewares.my-auth.basicAuth]
+  users = ["user:$apr1$..."]
+```
+
+Aliases: `traefik:middleware`
+
+---
+
 ### `traefik:reverb-port`
 
 Override the Reverb WebSocket port. The plugin auto-detects the port from Forge's Reverb integration config — use this tag only if the detected port is wrong.
