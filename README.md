@@ -23,6 +23,7 @@ A [Traefik](https://traefik.io) provider plugin that automatically generates HTT
 - [What to keep in static config](#what-to-keep-in-static-config)
 - [Verification tool](#verification-tool)
 - [Troubleshooting](#troubleshooting)
+- [API rate limits](#api-rate-limits)
 - [Development](#development)
 
 ## Requirements
@@ -120,7 +121,7 @@ That's all that's needed. The plugin discovers your servers and sites automatica
 |--------|------|---------|-------------|
 | `apiToken` | string | **required** | Forge API token — generate at forge.laravel.com/user/profile#/api. Use `${ENV_VAR}` to avoid storing in plain text |
 | `organization` | string | **required** | Forge organisation slug — from the URL: `forge.laravel.com/orgs/{slug}`. Can also use `${ENV_VAR}` |
-| `pollInterval` | string | `"30s"` | How often to poll Forge. Minimum `"10s"` |
+| `pollInterval` | string | `"30s"` | How often to poll Forge. Minimum `"10s"`. See [API rate limits](#api-rate-limits) before reducing this |
 | `defaultCertResolver` | string | `""` | Cert resolver name to use for all sites. Enables TLS when set |
 | `defaultSitesEnabled` | bool | `true` | Set to `false` for opt-in mode: only sites with `traefik:enabled` tag are routed |
 | `httpRedirect` | bool | `false` | Generate HTTP→HTTPS redirect routers for all sites |
@@ -314,6 +315,32 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
 
 **Poll interval error**
 - Minimum is `10s`. Recommended `30s`–`60s` in production.
+
+## API rate limits
+
+Forge's default API rate limit is **60 requests per minute**.
+
+Each poll consumes approximately `1 + (N_sites × 2)` requests:
+
+| Request | Count |
+|---------|-------|
+| List servers | 1 |
+| List sites (per server) | 1 per server |
+| Fetch domains (per site) | 1 per site |
+| Fetch Reverb integration (per site) | 1 per site |
+
+With 4 sites on 1 server that's **10 requests per poll**. At the default 30s interval that's 20 requests/minute — well within the limit.
+
+As a rough guide for choosing `pollInterval`:
+
+| Sites | Requests/poll | Safe minimum interval |
+|-------|--------------|----------------------|
+| 5 | 12 | 15s |
+| 10 | 22 | 30s |
+| 20 | 42 | 45s |
+| 25 | 52 | 60s |
+
+If you hit rate limits, Traefik logs will show Forge API errors. Increase `pollInterval` until they stop.
 
 ## Development
 
