@@ -342,6 +342,8 @@ As a rough guide for choosing `pollInterval`:
 
 If you hit rate limits, Traefik logs will show Forge API errors. Increase `pollInterval` until they stop.
 
+If you have a large number of sites and need a higher limit, Forge allows you to request an adjustment — see the [Forge API rate limiting docs](https://forge.laravel.com/docs/api-reference/rate-limiting) for details.
+
 ## Development
 
 ```bash
