@@ -5,10 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -19,21 +16,20 @@ import (
 // ServerMapping maps a Forge server to an upstream backend.
 type ServerMapping struct {
 	ForgeServerName string `json:"forgeServerName,omitempty"`
-	UpstreamHost    string `json:"upstreamHost,omitempty"` // Optional: auto-detected from Forge if not set
-	UpstreamPort    int    `json:"upstreamPort,omitempty"` // Optional: default 80
-	Traefik         string `json:"traefik,omitempty"`
+	UpstreamHost    string `json:"upstreamHost,omitempty"`
+	UpstreamPort    int    `json:"upstreamPort,omitempty"`
 }
 
-// Config the plugin configuration.
+// Config is the plugin configuration.
 type Config struct {
 	APIToken            string          `json:"apiToken,omitempty"`
 	Organization        string          `json:"organization,omitempty"`
 	PollInterval        string          `json:"pollInterval,omitempty"`
-	DefaultCertResolver string          `json:"defaultCertResolver,omitempty"` // Default cert resolver for TLS
-	DefaultSitesEnabled bool            `json:"defaultSitesEnabled,omitempty"` // Default: true - whether sites are enabled by default
-	HTTPRedirect        bool            `json:"httpRedirect,omitempty"`        // Create HTTP->HTTPS redirect routers
-	RedirectMiddleware  string          `json:"redirectMiddleware,omitempty"`  // Name of redirect middleware to use
-	TraefikID           string          `json:"traefikID,omitempty"`           // Only process servers tagged traefik:traefik-id=<this value>
+	DefaultCertResolver string          `json:"defaultCertResolver,omitempty"`
+	DefaultSitesEnabled bool            `json:"defaultSitesEnabled,omitempty"`
+	HTTPRedirect        bool            `json:"httpRedirect,omitempty"`
+	RedirectMiddleware  string          `json:"redirectMiddleware,omitempty"`
+	TraefikID           string          `json:"traefikID,omitempty"`
 	ServerMappings      []ServerMapping `json:"serverMappings,omitempty"`
 }
 
@@ -41,7 +37,7 @@ type Config struct {
 func CreateConfig() *Config {
 	return &Config{
 		PollInterval:        "30s",
-		DefaultSitesEnabled: true, // Sites enabled by default
+		DefaultSitesEnabled: true,
 		ServerMappings:      []ServerMapping{},
 	}
 }
@@ -95,23 +91,15 @@ type ForgeSiteAttributes struct {
 
 // ForgeReverbIntegration represents the Reverb integration config for a site.
 type ForgeReverbIntegration struct {
-	Enabled bool    `json:"enabled"`
-	Host    string  `json:"host"`
-	Port    int     `json:"port"`
-}
-
-// ForgeReverbResponse is the response from /integrations/reverb.
-type ForgeReverbResponse struct {
-	Data struct {
-		Attributes ForgeReverbIntegration `json:"attributes"`
-	} `json:"data"`
+	Enabled bool   `json:"enabled"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
 }
 
 // ForgeDomain represents a domain record attached to a Forge site.
-// The /domains endpoint returns these (type: "domainRecords").
 type ForgeDomain struct {
-	ID         string              `json:"id"`
-	Type       string              `json:"type"`
+	ID         string               `json:"id"`
+	Type       string               `json:"type"`
 	Attributes ForgeDomainAttributes `json:"attributes"`
 }
 
@@ -125,30 +113,18 @@ type ForgeDomainAttributes struct {
 	WWWRedirectType         string `json:"www_redirect_type"` // "none", "from-www", or "to-www"
 }
 
-// ForgeDomainsResponse is the JSON:API response from the /domains endpoint.
-type ForgeDomainsResponse struct {
-	Data  []ForgeDomain `json:"data"`
-	Links interface{}   `json:"links"`
-	Meta  interface{}   `json:"meta"`
+// ForgeClient abstracts all Forge API calls. Extracted as an interface to allow
+// testing generateConfiguration without live HTTP calls.
+//
+//go:generate mockery --name ForgeClient --filename mock_forge_client.go --outpkg mocks --dir mocks
+type ForgeClient interface {
+	FetchServers() ([]ForgeServer, error)
+	FetchSites(serverID string) ([]ForgeSite, error)
+	FetchDomains(serverID, siteID string) ([]ForgeDomain, error)
+	FetchReverbIntegration(serverID, siteID string) (*ForgeReverbIntegration, error)
 }
 
-// ForgeServersResponse represents the JSON:API response from listing servers.
-type ForgeServersResponse struct {
-	Data     []ForgeServer `json:"data"`
-	Included []interface{} `json:"included,omitempty"`
-	Links    interface{}   `json:"links"`
-	Meta     interface{}   `json:"meta"`
-}
-
-// ForgeSitesResponse represents the JSON:API response from listing sites.
-type ForgeSitesResponse struct {
-	Data     []ForgeSite   `json:"data"`
-	Included []interface{} `json:"included,omitempty"`
-	Links    interface{}   `json:"links"`
-	Meta     interface{}   `json:"meta"`
-}
-
-// Provider a Laravel Forge provider plugin.
+// Provider is the Laravel Forge provider plugin.
 type Provider struct {
 	name                string
 	apiToken            string
@@ -160,7 +136,7 @@ type Provider struct {
 	redirectMiddleware  string
 	traefikID           string
 	serverMappings      []ServerMapping
-	httpClient          *http.Client
+	client              ForgeClient
 
 	cancel func()
 }
@@ -170,7 +146,6 @@ func New(_ context.Context, config *Config, name string) (*Provider, error) {
 	if config.APIToken == "" {
 		return nil, fmt.Errorf("apiToken is required")
 	}
-
 	if config.Organization == "" {
 		return nil, fmt.Errorf("organization is required")
 	}
@@ -191,42 +166,43 @@ func New(_ context.Context, config *Config, name string) (*Provider, error) {
 		redirectMiddleware:  config.RedirectMiddleware,
 		traefikID:           config.TraefikID,
 		serverMappings:      config.ServerMappings,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		client:              newForgeHTTPClient(config.APIToken, config.Organization),
 	}, nil
 }
 
-// Init the provider.
+// Init validates the provider configuration.
 func (p *Provider) Init() error {
 	if p.pollInterval <= 0 {
 		return fmt.Errorf("poll interval must be greater than 0")
 	}
-
-	// Enforce minimum poll interval of 10 seconds
-	minInterval := 10 * time.Second
-	if p.pollInterval < minInterval {
+	if p.pollInterval < 10*time.Second {
 		return fmt.Errorf("poll interval must be at least 10s, got %s", p.pollInterval)
 	}
-
 	return nil
 }
 
-// Provide creates and send dynamic configuration.
+// Provide starts emitting dynamic configuration.
 func (p *Provider) Provide(cfgChan chan<- json.Marshaler) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 
 	go func() {
 		defer func() {
-			if err := recover(); err != nil {
-				log.Print(err)
+			if r := recover(); r != nil {
+				log.Print(r)
 			}
 		}()
-
 		p.loadConfiguration(ctx, cfgChan)
 	}()
 
+	return nil
+}
+
+// Stop halts the provider and its background goroutine.
+func (p *Provider) Stop() error {
+	if p.cancel != nil {
+		p.cancel()
+	}
 	return nil
 }
 
@@ -234,14 +210,12 @@ func (p *Provider) loadConfiguration(ctx context.Context, cfgChan chan<- json.Ma
 	ticker := time.NewTicker(p.pollInterval)
 	defer ticker.Stop()
 
-	// Send initial configuration immediately
 	p.sendConfiguration(cfgChan)
 
 	for {
 		select {
 		case <-ticker.C:
 			p.sendConfiguration(cfgChan)
-
 		case <-ctx.Done():
 			return
 		}
@@ -251,254 +225,28 @@ func (p *Provider) loadConfiguration(ctx context.Context, cfgChan chan<- json.Ma
 func (p *Provider) sendConfiguration(cfgChan chan<- json.Marshaler) {
 	configuration, err := p.generateConfiguration()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error generating configuration: %v\n", err)
+		log.Printf("Error generating configuration: %v", err)
 		return
 	}
-
 	cfgChan <- &dynamic.JSONPayload{Configuration: configuration}
 }
 
-// fetchForgeServers retrieves all servers from the Forge API v2.
-func (p *Provider) fetchForgeServers() ([]ForgeServer, error) {
-	servers, _, err := p.fetchForgeServersRaw()
-	return servers, err
+// GenerateConfiguration is the exported entry point used by the verify tool.
+func (p *Provider) GenerateConfiguration() (*dynamic.Configuration, error) {
+	return p.generateConfiguration()
 }
 
-func (p *Provider) fetchForgeServersRaw() ([]ForgeServer, json.RawMessage, error) {
-	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers?include=tags", p.organization)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create request: %w", err)
+// DumpRaw fetches and returns raw Forge API responses for debugging.
+// Only available when using the default HTTP client.
+func (p *Provider) DumpRaw() ([]byte, error) {
+	c, ok := p.client.(*forgeHTTPClient)
+	if !ok {
+		return nil, fmt.Errorf("DumpRaw is only supported with the HTTP Forge client")
 	}
-
-	req.Header.Set("Authorization", "Bearer "+p.apiToken)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch servers: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read servers response: %w", err)
-	}
-
-	var serversResp ForgeServersResponse
-	if err := json.Unmarshal(raw, &serversResp); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode servers response: %w", err)
-	}
-
-	p.mapTagsToServers(&serversResp)
-
-	return serversResp.Data, json.RawMessage(raw), nil
+	return c.dumpRaw()
 }
 
-// mapTagsToServers resolves tag names from the included array and populates each server's Tags slice.
-func (p *Provider) mapTagsToServers(resp *ForgeServersResponse) {
-	tagMap := buildTagMap(resp.Included)
-	for i := range resp.Data {
-		for _, ref := range resp.Data[i].Relationships.Tags.Data {
-			if name, ok := tagMap[ref.ID]; ok {
-				resp.Data[i].Attributes.Tags = append(resp.Data[i].Attributes.Tags, name)
-			}
-		}
-	}
-}
-
-// fetchForgeSites retrieves all sites for a specific server from the Forge API v2.
-func (p *Provider) fetchForgeSites(serverID string) ([]ForgeSite, error) {
-	sites, _, err := p.fetchForgeSitesRaw(serverID)
-	return sites, err
-}
-
-func (p *Provider) fetchForgeSitesRaw(serverID string) ([]ForgeSite, json.RawMessage, error) {
-	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites?include=tags", p.organization, serverID)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+p.apiToken)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch sites: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read sites response: %w", err)
-	}
-
-	var sitesResp ForgeSitesResponse
-	if err := json.Unmarshal(raw, &sitesResp); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode sites response: %w", err)
-	}
-
-	p.mapTagsToSites(&sitesResp)
-
-	return sitesResp.Data, json.RawMessage(raw), nil
-}
-
-// mapTagsToSites resolves tag names from the included array and populates each site's Tags slice.
-func (p *Provider) mapTagsToSites(resp *ForgeSitesResponse) {
-	tagMap := buildTagMap(resp.Included)
-	for i := range resp.Data {
-		for _, ref := range resp.Data[i].Relationships.Tags.Data {
-			if name, ok := tagMap[ref.ID]; ok {
-				resp.Data[i].Attributes.Tags = append(resp.Data[i].Attributes.Tags, name)
-			}
-		}
-	}
-}
-
-// buildTagMap builds a map of tag ID -> tag name from a JSON:API included array.
-func buildTagMap(included []interface{}) map[string]string {
-	tagMap := make(map[string]string)
-	for _, item := range included {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if m["type"] != "tags" {
-			continue
-		}
-		id, _ := m["id"].(string)
-		attrs, _ := m["attributes"].(map[string]interface{})
-		name, _ := attrs["name"].(string)
-		if id != "" && name != "" {
-			tagMap[id] = name
-		}
-	}
-	return tagMap
-}
-
-// fetchForgeDomains retrieves all domain records for a site from the /domains endpoint.
-func (p *Provider) fetchForgeDomains(serverID, siteID string) ([]ForgeDomain, error) {
-	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s/domains", p.organization, serverID, siteID)
-	raw, err := p.fetchRaw(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch domains: %w", err)
-	}
-	if raw == nil {
-		return nil, nil
-	}
-	var resp ForgeDomainsResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("failed to decode domains response: %w", err)
-	}
-	return resp.Data, nil
-}
-
-// fetchReverbIntegration retrieves the Reverb integration config for a site.
-// Returns nil if Reverb is not enabled or the endpoint is unavailable.
-func (p *Provider) fetchReverbIntegration(serverID, siteID string) (*ForgeReverbIntegration, error) {
-	url := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s/integrations/reverb", p.organization, serverID, siteID)
-	raw, err := p.fetchRaw(url)
-	if err != nil || raw == nil {
-		return nil, err
-	}
-	var resp ForgeReverbResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("failed to decode reverb response: %w", err)
-	}
-	if !resp.Data.Attributes.Enabled || resp.Data.Attributes.Host == "" || resp.Data.Attributes.Port == 0 {
-		return nil, nil
-	}
-	return &resp.Data.Attributes, nil
-}
-
-// ParseTagConfig parses a tag for configuration directives.
-// Format: "traefik:key=value" or "traefik:flag"
-// Returns key, value, and whether it's a traefik tag.
-func ParseTagConfig(tag string) (string, string, bool) {
-	const prefix = "traefik:"
-	if !strings.HasPrefix(tag, prefix) {
-		return "", "", false
-	}
-
-	content := strings.TrimPrefix(tag, prefix)
-	if content == "" {
-		return "", "", false
-	}
-
-	// Check for key=value format
-	if idx := strings.Index(content, "="); idx > 0 {
-		key := strings.TrimSpace(content[:idx])
-		value := strings.TrimSpace(content[idx+1:])
-		return key, value, true
-	}
-
-	// Just a flag
-	return strings.TrimSpace(content), "true", true
-}
-
-// ServerConfig holds configuration parsed from server tags.
-type ServerConfig struct {
-	UpstreamHost string
-	UpstreamPort int
-	TraefikID    string
-}
-
-// ParseServerTags parses server tags to extract configuration (exported for testing).
-func ParseServerTags(tags []string) ServerConfig {
-	cfg := ServerConfig{
-		UpstreamPort: 80, // Default port
-	}
-
-	for _, tag := range tags {
-		key, value, isTraefikTag := ParseTagConfig(tag)
-		if !isTraefikTag {
-			continue
-		}
-
-		switch key {
-		case "upstream-host", "upstreamhost":
-			cfg.UpstreamHost = value
-		case "upstream-port", "upstreamport":
-			var port int
-			if n, err := fmt.Sscanf(value, "%d", &port); err == nil && n == 1 {
-				cfg.UpstreamPort = port
-			}
-		case "traefik", "traefik-id":
-			cfg.TraefikID = value
-		// Keep old aliases for backward compatibility
-		case "lb-host", "loadbalancer-host":
-			cfg.UpstreamHost = value
-		case "lb-port", "loadbalancer-port":
-			var port int
-			if n, err := fmt.Sscanf(value, "%d", &port); err == nil && n == 1 {
-				cfg.UpstreamPort = port
-			}
-		}
-	}
-
-	return cfg
-}
-
-// Stop to stop the provider and the related go routines.
-func (p *Provider) Stop() error {
-	if p.cancel != nil {
-		p.cancel()
-	}
-	return nil
-}
-
-// generateConfiguration fetches data from Forge and generates Traefik configuration.
+// generateConfiguration fetches data from Forge via the client and builds Traefik config.
 func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	configuration := &dynamic.Configuration{
 		HTTP: &dynamic.HTTPConfiguration{
@@ -521,8 +269,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		},
 	}
 
-	// If httpRedirect is enabled without an explicit middleware name, create one.
-	// This makes common.toml unnecessary — the plugin is self-contained.
+	// Auto-create the redirect middleware when httpRedirect is on and no external one is named.
 	redirectMiddlewareName := p.redirectMiddleware
 	if p.httpRedirect && redirectMiddlewareName == "" {
 		redirectMiddlewareName = "forge-https-redirect"
@@ -534,525 +281,520 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		}
 	}
 
-	// Fetch all servers from Forge
-	servers, err := p.fetchForgeServers()
+	servers, err := p.client.FetchServers()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch servers: %w", err)
 	}
 
-	fmt.Printf("Fetched %d servers from Forge\n", len(servers))
+	log.Printf("Fetched %d servers from Forge", len(servers))
 
-	// Process each server and its sites
 	for _, server := range servers {
-		// Parse tags first (highest priority)
-		tagConfig := ParseServerTags(server.Attributes.Tags)
-
-		// If traefikID filtering is active, skip servers that don't carry a matching tag.
-		// Servers with no traefik:traefik-id tag are also skipped — in multi-LB setups
-		// every server should be explicitly assigned.
-		if p.traefikID != "" && tagConfig.TraefikID != p.traefikID {
-			fmt.Printf("Server '%s' skipped (traefik-id=%q, want %q)\n", server.Attributes.Name, tagConfig.TraefikID, p.traefikID)
-			continue
-		}
-
-		// Find the mapping for this server (fallback to config file)
-		var mapping *ServerMapping
-		for i := range p.serverMappings {
-			if p.serverMappings[i].ForgeServerName == server.Attributes.Name {
-				mapping = &p.serverMappings[i]
-				break
-			}
-		}
-
-		// Determine configuration source: tags > mapping > none
-		// If no configuration exists, server will be processed but might have no enabled sites
-		var upstreamHost string
-		upstreamPort := 80 // default
-		var configSource string
-		var hasConfig bool
-
-		// Priority 1: Tags
-		if tagConfig.UpstreamHost != "" {
-			upstreamHost = tagConfig.UpstreamHost
-			upstreamPort = tagConfig.UpstreamPort
-			configSource = "tags"
-			hasConfig = true
-		} else if mapping != nil {
-			// Priority 2: Config file mapping
-			upstreamHost = mapping.UpstreamHost
-			upstreamPort = mapping.UpstreamPort
-			if upstreamPort == 0 {
-				upstreamPort = 80
-			}
-			configSource = "config mapping"
-			hasConfig = true
-		}
-
-		// If no explicit config, we can still process if sites are explicitly enabled
-		// This allows for "traefik:enabled=true" on a site to pull in the server automatically
-		if !hasConfig {
-			fmt.Printf("No explicit configuration for server '%s', will check for enabled sites\n", server.Attributes.Name)
-		}
-
-		// Fetch sites for this server first to see if any are enabled
-		sites, err := p.fetchForgeSites(server.ID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to fetch sites for server %s: %v\n", server.Attributes.Name, err)
-			continue
-		}
-
-		fmt.Printf("Found %d sites on server '%s'\n", len(sites), server.Attributes.Name)
-
-		// Count how many sites will actually be processed
-		enabledSitesCount := 0
-		for _, site := range sites {
-			if site.Attributes.Status != "installed" {
-				continue
-			}
-			// Check if site would be enabled
-			siteEnabled := p.defaultSitesEnabled
-			for _, tag := range site.Attributes.Tags {
-				key, value, isTraefikTag := ParseTagConfig(tag)
-				if isTraefikTag && key == "enabled" {
-					siteEnabled = value == "true"
-					break
-				}
-			}
-			if siteEnabled {
-				enabledSitesCount++
-			}
-		}
-
-		// Skip server if no enabled sites
-		if enabledSitesCount == 0 {
-			fmt.Printf("Server '%s' has no enabled sites, skipping\n", server.Attributes.Name)
-			continue
-		}
-
-		// Now we know we need this server - determine backend config
-		// Auto-detect IP if not explicitly set
-		if upstreamHost == "" {
-			// Auto-detect from Forge: prefer private IP, fallback to public IP
-			switch {
-			case server.Attributes.PrivateIPAddress != "":
-				upstreamHost = server.Attributes.PrivateIPAddress
-				fmt.Printf("Auto-detected private IP for server '%s': %s\n", server.Attributes.Name, upstreamHost)
-			case server.Attributes.IPAddress != "":
-				upstreamHost = server.Attributes.IPAddress
-				fmt.Printf("Using public IP for server '%s': %s\n", server.Attributes.Name, upstreamHost)
-			default:
-				fmt.Fprintf(os.Stderr, "No IP address found for server '%s' (has %d enabled sites), skipping\n", server.Attributes.Name, enabledSitesCount)
-				continue
-			}
-		}
-
-		backendURL := fmt.Sprintf("http://%s:%d", upstreamHost, upstreamPort)
-
-		if hasConfig {
-			fmt.Printf("Processing server '%s' (ID: %s) -> %s (via %s, %d enabled sites)\n", server.Attributes.Name, server.ID, backendURL, configSource, enabledSitesCount)
-		} else {
-			fmt.Printf("Processing server '%s' (ID: %s) -> %s (auto-detected, %d enabled sites)\n", server.Attributes.Name, server.ID, backendURL, enabledSitesCount)
-		}
-
-		// Create router and service for each site
-		for _, site := range sites {
-			// Skip sites that aren't installed yet
-			if site.Attributes.Status != "installed" {
-				fmt.Printf("Site '%s' status is '%s', skipping\n", site.Attributes.Name, site.Attributes.Status)
-				continue
-			}
-
-			routerName := fmt.Sprintf("forge-%s-%s", server.Attributes.Name, site.ID)
-			serviceName := fmt.Sprintf("forge-%s-%s-service", server.Attributes.Name, site.ID)
-
-			// Parse site tags for configuration
-			certResolver := p.defaultCertResolver
-			enableTLS := p.defaultCertResolver != ""
-			siteEnabled := p.defaultSitesEnabled
-			sitePort := upstreamPort
-			httpRedirect := p.httpRedirect
-			var entryPoints []string
-			var tagAliases []string      // extra hosts from traefik:aliases= tag
-			var tagMiddlewares []string  // extra middlewares from traefik:middlewares= tag
-			reverbPortOverride := 0      // traefik:reverb-port= tag
-			includeForgeDomain := false  // traefik:forge-domain=true opts .on-forge.com into routing
-
-			for _, tag := range site.Attributes.Tags {
-				key, value, isTraefikTag := ParseTagConfig(tag)
-				if !isTraefikTag {
-					continue
-				}
-
-				switch key {
-				case "enabled":
-					siteEnabled = value == "true"
-					fmt.Printf("Site '%s' explicitly %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[siteEnabled])
-				case "cert-resolver", "certresolver":
-					certResolver = value
-					enableTLS = true
-					fmt.Printf("Site '%s' using cert resolver from tag: %s\n", site.Attributes.Name, value)
-				case "tls":
-					enableTLS = value == "true"
-					fmt.Printf("Site '%s' TLS %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[enableTLS])
-				case "port":
-					if n, err := fmt.Sscanf(value, "%d", &sitePort); err == nil && n == 1 {
-						fmt.Printf("Site '%s' using port %d from tag\n", site.Attributes.Name, sitePort)
-					}
-				case "http-redirect", "redirect":
-					httpRedirect = value == "true"
-					fmt.Printf("Site '%s' HTTP redirect %s via tag\n", site.Attributes.Name, map[bool]string{true: "enabled", false: "disabled"}[httpRedirect])
-				case "entrypoints", "entry-points":
-					entryPoints = strings.Split(value, ",")
-					for i := range entryPoints {
-						entryPoints[i] = strings.TrimSpace(entryPoints[i])
-					}
-					fmt.Printf("Site '%s' using custom entry points: %v\n", site.Attributes.Name, entryPoints)
-				case "aliases":
-					for _, a := range strings.Split(value, ",") {
-						if a = strings.TrimSpace(a); a != "" {
-							tagAliases = append(tagAliases, a)
-						}
-					}
-					fmt.Printf("Site '%s' tag aliases: %v\n", site.Attributes.Name, tagAliases)
-				case "reverb-port":
-					if n, err := fmt.Sscanf(value, "%d", &reverbPortOverride); err == nil && n == 1 {
-						fmt.Printf("Site '%s' reverb port overridden to %d via tag\n", site.Attributes.Name, reverbPortOverride)
-					}
-				case "forge-domain":
-					includeForgeDomain = value == "true"
-					fmt.Printf("Site '%s' .on-forge.com domain %s via tag\n", site.Attributes.Name, map[bool]string{true: "included", false: "excluded"}[includeForgeDomain])
-				case "middlewares", "middleware":
-					for _, m := range strings.Split(value, ",") {
-						if m = strings.TrimSpace(m); m != "" {
-							tagMiddlewares = append(tagMiddlewares, m)
-						}
-					}
-					fmt.Printf("Site '%s' extra middlewares: %v\n", site.Attributes.Name, tagMiddlewares)
-				}
-			}
-
-			// Skip if site is disabled
-			if !siteEnabled {
-				fmt.Printf("Site '%s' disabled, skipping\n", site.Attributes.Name)
-				continue
-			}
-
-			// Fetch domain records and reverb integration in parallel context.
-			domains, err := p.fetchForgeDomains(server.ID, site.ID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to fetch domains for site '%s': %v, falling back to site name\n", site.Attributes.Name, err)
-			}
-
-			reverb, err := p.fetchReverbIntegration(server.ID, site.ID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to fetch reverb integration for site '%s': %v\n", site.Attributes.Name, err)
-			}
-
-			// reverbHost is the authoritative reverb hostname from the integration.
-			// Domains matching this host are routed to the reverb port instead of the main backend.
-			reverbHost := ""
-			reverbPort := 0
-			if reverb != nil {
-				reverbHost = reverb.Host
-				reverbPort = reverb.Port
-			}
-			if reverbPortOverride > 0 {
-				reverbPort = reverbPortOverride
-			}
-
-			// Separate domain records into main hosts and reverb host.
-			// Track wildcard-enabled domains separately for HostRegexp rules.
-			var mainHosts []string
-			var wildcardHosts []string // domains with allow_wildcard_subdomains=true
-			var reverbHosts []string
-
-			for _, d := range domains {
-				if d.Attributes.Status != "enabled" {
-					continue
-				}
-				if reverbHost != "" && d.Attributes.Name == reverbHost {
-					reverbHosts = append(reverbHosts, d.Attributes.Name)
-				} else {
-					mainHosts = append(mainHosts, d.Attributes.Name)
-					if d.Attributes.AllowWildcardSubdomains {
-						wildcardHosts = append(wildcardHosts, d.Attributes.Name)
-					}
-					// If Forge is managing a www redirect for this domain, Traefik must
-					// accept traffic on both the apex and www so the request reaches Nginx.
-					if d.Attributes.WWWRedirectType != "" && d.Attributes.WWWRedirectType != "none" {
-						wwwHost := "www." + d.Attributes.Name
-						if !strings.HasPrefix(d.Attributes.Name, "www.") {
-							mainHosts = append(mainHosts, wwwHost)
-							fmt.Printf("Added %s to router rule (www_redirect_type=%s)\n", wwwHost, d.Attributes.WWWRedirectType)
-						}
-					}
-				}
-			}
-
-			// If no domain records came back, fall back to the Forge site name.
-			if len(mainHosts) == 0 {
-				mainHosts = []string{site.Attributes.Name}
-			}
-
-			// Handle .on-forge.com domains.
-			// These are Forge-managed subdomains: Forge controls TLS for them and their
-			// DNS may not point to this load balancer, so we skip them by default.
-			//
-			// Rules:
-			//  - .on-forge.com hosts are excluded from the router unless includeForgeDomain is true.
-			//  - If real (custom) domains remain after filtering, TLS applies normally.
-			//  - If only .on-forge.com hosts remain (includeForgeDomain forced them in), TLS is
-			//    disabled — we can't obtain certs for domains we don't control.
-			//  - If no valid hosts remain at all, skip the site entirely.
-			var filteredHosts []string
-			hasRealDomain := false
-
-			for _, h := range mainHosts {
-				if strings.HasSuffix(h, ".on-forge.com") {
-					if includeForgeDomain {
-						filteredHosts = append(filteredHosts, h)
-					}
-				} else {
-					filteredHosts = append(filteredHosts, h)
-					hasRealDomain = true
-				}
-			}
-
-			if len(filteredHosts) == 0 {
-				fmt.Printf("Site '%s' has no valid domains (only .on-forge.com, use traefik:forge-domain=true to include) — skipping\n", site.Attributes.Name)
-				continue
-			}
-
-			mainHosts = filteredHosts
-
-			if !hasRealDomain {
-				// Only .on-forge.com hosts — disable cert resolver.
-				// Forge manages TLS for these via its own infrastructure.
-				if certResolver != "" || enableTLS {
-					fmt.Printf("Site '%s' uses only .on-forge.com domains — disabling TLS\n", site.Attributes.Name)
-					certResolver = ""
-					enableTLS = false
-				}
-			}
-
-			// Append any hosts from traefik:aliases= tag not already present.
-			existing := make(map[string]bool)
-			for _, h := range mainHosts {
-				existing[h] = true
-			}
-			for _, a := range tagAliases {
-				if !existing[a] {
-					mainHosts = append(mainHosts, a)
-				}
-			}
-
-			// Build backend URL with site-specific port
-			siteBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, sitePort)
-
-			// Determine entry points
-			if len(entryPoints) == 0 {
-				if enableTLS {
-					entryPoints = []string{"websecure"}
-				} else {
-					entryPoints = []string{"web"}
-				}
-			}
-
-			// Build Host() rule from all main hosts, adding HostRegexp for wildcard domains
-			hostRule := buildHostRule(mainHosts, wildcardHosts)
-
-			// Create the main router
-			router := &dynamic.Router{
-				EntryPoints: entryPoints,
-				Service:     serviceName,
-				Rule:        hostRule,
-				Middlewares: tagMiddlewares,
-			}
-			if enableTLS {
-				router.TLS = &dynamic.RouterTLSConfig{}
-				if certResolver != "" {
-					router.TLS.CertResolver = certResolver
-				}
-			}
-			configuration.HTTP.Routers[routerName] = router
-
-			// Create HTTP redirect router if needed
-			if httpRedirect && enableTLS {
-				httpRouterName := fmt.Sprintf("%s-http", routerName)
-				httpRouter := &dynamic.Router{
-					EntryPoints: []string{"web"},
-					Service:     serviceName,
-					Rule:        hostRule,
-				}
-				if redirectMiddlewareName != "" {
-					httpRouter.Middlewares = []string{redirectMiddlewareName}
-				}
-				configuration.HTTP.Routers[httpRouterName] = httpRouter
-			}
-
-			// Create the service
-			configuration.HTTP.Services[serviceName] = &dynamic.Service{
-				LoadBalancer: &dynamic.ServersLoadBalancer{
-					Servers:        []dynamic.Server{{URL: siteBackendURL}},
-					PassHostHeader: boolPtr(true),
-				},
-			}
-
-			tlsInfo := "no TLS"
-			if enableTLS {
-				if certResolver != "" {
-					tlsInfo = fmt.Sprintf("TLS with %s", certResolver)
-				} else {
-					tlsInfo = "TLS enabled"
-				}
-				if httpRedirect {
-					tlsInfo += " + HTTP redirect"
-				}
-			}
-			fmt.Printf("Created router for site '%s' hosts=%v -> %s (%s)\n", site.Attributes.Name, mainHosts, siteBackendURL, tlsInfo)
-
-			// Create separate routers for Reverb (WebSocket) domains
-			if len(reverbHosts) > 0 && reverbPort > 0 {
-				reverbServiceName := fmt.Sprintf("%s-reverb-service", routerName)
-				reverbBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, reverbPort)
-				reverbRule := buildHostRule(reverbHosts, nil)
-
-				reverbRouter := &dynamic.Router{
-					EntryPoints: entryPoints,
-					Service:     reverbServiceName,
-					Rule:        reverbRule,
-					Middlewares: tagMiddlewares,
-				}
-				if enableTLS {
-					reverbRouter.TLS = &dynamic.RouterTLSConfig{}
-					if certResolver != "" {
-						reverbRouter.TLS.CertResolver = certResolver
-					}
-				}
-				configuration.HTTP.Routers[fmt.Sprintf("%s-reverb", routerName)] = reverbRouter
-
-				// No HTTP redirect router for Reverb — WebSocket clients don't follow
-				// HTTP redirects during the upgrade handshake, so it would never be used.
-
-				configuration.HTTP.Services[reverbServiceName] = &dynamic.Service{
-					LoadBalancer: &dynamic.ServersLoadBalancer{
-						Servers:        []dynamic.Server{{URL: reverbBackendURL}},
-						PassHostHeader: boolPtr(true),
-					},
-				}
-				fmt.Printf("Created Reverb router for site '%s' hosts=%v -> %s\n", site.Attributes.Name, reverbHosts, reverbBackendURL)
-			}
-		}
+		p.processServer(server, configuration, redirectMiddlewareName)
 	}
 
 	return configuration, nil
 }
 
-// GenerateConfiguration is the exported entry point for previewing what the plugin would produce.
-// Useful for verification and testing without running Traefik.
-func (p *Provider) GenerateConfiguration() (*dynamic.Configuration, error) {
-	return p.generateConfiguration()
+func (p *Provider) processServer(
+	server ForgeServer,
+	configuration *dynamic.Configuration,
+	redirectMiddlewareName string,
+) {
+	tagConfig := ParseServerTags(server.Attributes.Tags)
+
+	// In multi-LB mode, skip servers not assigned to this instance.
+	if p.traefikID != "" && tagConfig.TraefikID != p.traefikID {
+		log.Printf("Server %q skipped (traefik-id=%q, want %q)",
+			server.Attributes.Name, tagConfig.TraefikID, p.traefikID)
+		return
+	}
+
+	// Look up an explicit server mapping from plugin config (lowest priority override).
+	var mapping *ServerMapping
+	for i := range p.serverMappings {
+		if p.serverMappings[i].ForgeServerName == server.Attributes.Name {
+			mapping = &p.serverMappings[i]
+			break
+		}
+	}
+
+	// Resolve upstream host: tags > mapping > auto-detect from Forge.
+	upstreamHost, upstreamPort := p.resolveUpstream(server, tagConfig, mapping)
+	if upstreamHost == "" {
+		// Checked again after site filtering; log deferred to resolveUpstream.
+		log.Printf("Server %q has no upstream host — will skip if any sites need routing",
+			server.Attributes.Name)
+	}
+
+	sites, err := p.client.FetchSites(server.ID)
+	if err != nil {
+		log.Printf("Failed to fetch sites for server %q: %v", server.Attributes.Name, err)
+		return
+	}
+
+	log.Printf("Found %d sites on server %q", len(sites), server.Attributes.Name)
+
+	// Skip the server entirely if none of its sites are enabled.
+	if !hasEnabledSites(sites, p.defaultSitesEnabled) {
+		log.Printf("Server %q has no enabled sites, skipping", server.Attributes.Name)
+		return
+	}
+
+	if upstreamHost == "" {
+		log.Printf("Server %q has enabled sites but no IP address — skipping", server.Attributes.Name)
+		return
+	}
+
+	log.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
+
+	for _, site := range sites {
+		p.processSite(site, server.ID, upstreamHost, upstreamPort, configuration, redirectMiddlewareName)
+	}
 }
 
-// DumpRaw fetches raw JSON from the Forge API for all servers, their sites,
-// individual site details, and any aliases/custom-domain endpoints.
-// Useful for inspecting the actual API response shape during development.
-func (p *Provider) DumpRaw() ([]byte, error) {
-	servers, rawServers, err := p.fetchForgeServersRaw()
-	if err != nil {
-		return nil, err
-	}
+// resolveUpstream determines the upstream host and port for a server using the
+// priority chain: server tag > server mapping > auto-detected Forge IP.
+// Returns empty string for host if no IP is available.
+func (p *Provider) resolveUpstream(
+	server ForgeServer,
+	tagConfig ServerConfig,
+	mapping *ServerMapping,
+) (host string, port int) {
+	port = 80
 
-	type siteDump struct {
-		ServerID   string            `json:"server_id"`
-		ServerName string            `json:"server_name"`
-		SitesList  json.RawMessage   `json:"sites_list"`
-		Domains    []json.RawMessage `json:"domains"`
-		Reverb     []json.RawMessage `json:"reverb"`
-	}
-	var siteDumps []siteDump
-
-	for _, server := range servers {
-		sites, raw, err := p.fetchForgeSitesRaw(server.ID)
-		if err != nil {
-			return nil, fmt.Errorf("sites for server %s: %w", server.Attributes.Name, err)
+	switch {
+	case tagConfig.UpstreamHost != "":
+		return tagConfig.UpstreamHost, tagConfig.UpstreamPort
+	case mapping != nil:
+		mp := mapping.UpstreamPort
+		if mp == 0 {
+			mp = 80
 		}
-
-		dump := siteDump{
-			ServerID:   server.ID,
-			ServerName: server.Attributes.Name,
-			SitesList:  raw,
-		}
-
-		for _, site := range sites {
-			base := fmt.Sprintf("https://forge.laravel.com/api/orgs/%s/servers/%s/sites/%s", p.organization, server.ID, site.ID)
-
-			if d, _ := p.fetchRaw(base + "/domains"); d != nil {
-				dump.Domains = append(dump.Domains, d)
-			}
-
-			// Fetch Reverb integration config.
-			if r, _ := p.fetchRaw(base + "/integrations/reverb"); r != nil {
-				dump.Reverb = append(dump.Reverb, r)
-			}
-		}
-
-		siteDumps = append(siteDumps, dump)
+		return mapping.UpstreamHost, mp
+	case server.Attributes.PrivateIPAddress != "":
+		return server.Attributes.PrivateIPAddress, port
+	case server.Attributes.IPAddress != "":
+		return server.Attributes.IPAddress, port
+	default:
+		return "", port
 	}
-
-	out := struct {
-		Servers json.RawMessage `json:"servers"`
-		Sites   []siteDump      `json:"sites"`
-	}{
-		Servers: rawServers,
-		Sites:   siteDumps,
-	}
-	return json.MarshalIndent(out, "", "  ")
 }
 
-// fetchRaw performs a GET request and returns the raw response body.
-// Returns nil, nil for non-200 responses (used for probing optional endpoints).
-func (p *Provider) fetchRaw(url string) (json.RawMessage, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
+// hasEnabledSites reports whether any installed site in the list would be enabled
+// given the default sites-enabled policy.
+func hasEnabledSites(sites []ForgeSite, defaultEnabled bool) bool {
+	for _, site := range sites {
+		if site.Attributes.Status != "installed" {
+			continue
+		}
+		if isSiteEnabled(site.Attributes.Tags, defaultEnabled) {
+			return true
+		}
 	}
-	req.Header.Set("Authorization", "Bearer "+p.apiToken)
-	req.Header.Set("Accept", "application/json")
+	return false
+}
 
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, err
+// isSiteEnabled returns the effective enabled state for a site, considering
+// the default policy and any traefik:enabled tag override.
+func isSiteEnabled(tags []string, defaultEnabled bool) bool {
+	for _, tag := range tags {
+		key, value, ok := ParseTagConfig(tag)
+		if ok && key == "enabled" {
+			return value == "true"
+		}
 	}
-	defer func() { _ = resp.Body.Close() }()
+	return defaultEnabled
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil
+func (p *Provider) processSite(
+	site ForgeSite,
+	serverID, upstreamHost string,
+	upstreamPort int,
+	configuration *dynamic.Configuration,
+	redirectMiddlewareName string,
+) {
+	if site.Attributes.Status != "installed" {
+		log.Printf("Site %q status=%q, skipping", site.Attributes.Name, site.Attributes.Status)
+		return
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	defaults := siteDefaults{
+		CertResolver: p.defaultCertResolver,
+		SitesEnabled: p.defaultSitesEnabled,
+		HTTPRedirect: p.httpRedirect,
+		Port:         upstreamPort,
 	}
-	return json.RawMessage(body), nil
+	tags := parseSiteTags(site.Attributes.Tags, defaults)
+
+	if !tags.Enabled {
+		log.Printf("Site %q disabled, skipping", site.Attributes.Name)
+		return
+	}
+
+	domains, err := p.client.FetchDomains(serverID, site.ID)
+	if err != nil {
+		log.Printf("Failed to fetch domains for site %q: %v — falling back to site name",
+			site.Attributes.Name, err)
+	}
+
+	reverb, err := p.client.FetchReverbIntegration(serverID, site.ID)
+	if err != nil {
+		log.Printf("Failed to fetch Reverb integration for site %q: %v", site.Attributes.Name, err)
+	}
+
+	reverbHost, reverbPort := "", 0
+	if reverb != nil {
+		reverbHost = reverb.Host
+		reverbPort = reverb.Port
+	}
+	if tags.ReverbPortOverride > 0 {
+		reverbPort = tags.ReverbPortOverride
+	}
+
+	mainHosts, wildcardHosts, reverbHosts := classifyDomains(domains, reverbHost)
+
+	if len(mainHosts) == 0 {
+		mainHosts = []string{site.Attributes.Name}
+	}
+
+	// Filter .on-forge.com domains and apply TLS rules.
+	mainHosts, enableTLS, certResolver := applyForgeDomainPolicy(
+		mainHosts, tags.IncludeForgeDomain, tags.EnableTLS, tags.CertResolver,
+		site.Attributes.Name,
+	)
+	if len(mainHosts) == 0 {
+		return // site skipped — only .on-forge.com domains and not opted in
+	}
+
+	// Append tag aliases not already present.
+	mainHosts = appendAliases(mainHosts, tags.Aliases)
+
+	routerName := fmt.Sprintf("forge-%s-%s", site.Attributes.Name, site.ID)
+	serviceName := fmt.Sprintf("%s-service", routerName)
+	siteBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port)
+
+	entryPoints := tags.EntryPoints
+	if len(entryPoints) == 0 {
+		if enableTLS {
+			entryPoints = []string{"websecure"}
+		} else {
+			entryPoints = []string{"web"}
+		}
+	}
+
+	hostRule := buildHostRule(mainHosts, wildcardHosts)
+
+	router := &dynamic.Router{
+		EntryPoints: entryPoints,
+		Service:     serviceName,
+		Rule:        hostRule,
+		Middlewares: tags.Middlewares,
+	}
+	if enableTLS {
+		router.TLS = &dynamic.RouterTLSConfig{}
+		if certResolver != "" {
+			router.TLS.CertResolver = certResolver
+		}
+	}
+	configuration.HTTP.Routers[routerName] = router
+
+	if tags.HTTPRedirect && enableTLS {
+		httpRouter := &dynamic.Router{
+			EntryPoints: []string{"web"},
+			Service:     serviceName,
+			Rule:        hostRule,
+		}
+		if redirectMiddlewareName != "" {
+			httpRouter.Middlewares = []string{redirectMiddlewareName}
+		}
+		configuration.HTTP.Routers[routerName+"-http"] = httpRouter
+	}
+
+	configuration.HTTP.Services[serviceName] = &dynamic.Service{
+		LoadBalancer: &dynamic.ServersLoadBalancer{
+			Servers:        []dynamic.Server{{URL: siteBackendURL}},
+			PassHostHeader: boolPtr(true),
+		},
+	}
+
+	log.Printf("Created router for site %q hosts=%v -> %s", site.Attributes.Name, mainHosts, siteBackendURL)
+
+	if len(reverbHosts) > 0 && reverbPort > 0 {
+		p.addReverbRouter(routerName, reverbHosts, upstreamHost, reverbPort, entryPoints,
+			enableTLS, certResolver, tags.Middlewares, configuration)
+		log.Printf("Created Reverb router for site %q hosts=%v port=%d",
+			site.Attributes.Name, reverbHosts, reverbPort)
+	}
+}
+
+func (p *Provider) addReverbRouter(
+	baseRouterName string,
+	reverbHosts []string,
+	upstreamHost string,
+	reverbPort int,
+	entryPoints []string,
+	enableTLS bool,
+	certResolver string,
+	middlewares []string,
+	configuration *dynamic.Configuration,
+) {
+	reverbRouterName := baseRouterName + "-reverb"
+	reverbServiceName := reverbRouterName + "-service"
+	reverbBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, reverbPort)
+	reverbRule := buildHostRule(reverbHosts, nil)
+
+	reverbRouter := &dynamic.Router{
+		EntryPoints: entryPoints,
+		Service:     reverbServiceName,
+		Rule:        reverbRule,
+		Middlewares: middlewares,
+	}
+	if enableTLS {
+		reverbRouter.TLS = &dynamic.RouterTLSConfig{}
+		if certResolver != "" {
+			reverbRouter.TLS.CertResolver = certResolver
+		}
+	}
+	configuration.HTTP.Routers[reverbRouterName] = reverbRouter
+
+	// No HTTP redirect router for Reverb — WebSocket clients don't follow
+	// HTTP redirects during the upgrade handshake, so it would never be used.
+
+	configuration.HTTP.Services[reverbServiceName] = &dynamic.Service{
+		LoadBalancer: &dynamic.ServersLoadBalancer{
+			Servers:        []dynamic.Server{{URL: reverbBackendURL}},
+			PassHostHeader: boolPtr(true),
+		},
+	}
+}
+
+// classifyDomains partitions enabled domain records into main hosts, wildcard hosts,
+// and Reverb hosts. The reverbHost argument is the authoritative host from the
+// Reverb integration API; domain type alone is not sufficient.
+func classifyDomains(domains []ForgeDomain, reverbHost string) (main, wildcard, reverb []string) {
+	for _, d := range domains {
+		if d.Attributes.Status != "enabled" {
+			continue
+		}
+		name := d.Attributes.Name
+		if reverbHost != "" && name == reverbHost {
+			reverb = append(reverb, name)
+			continue
+		}
+		main = append(main, name)
+		if d.Attributes.AllowWildcardSubdomains {
+			wildcard = append(wildcard, name)
+		}
+		// If Forge manages a www redirect for this domain, Traefik must accept
+		// traffic on both apex and www — the redirect itself is handled by Nginx.
+		if d.Attributes.WWWRedirectType != "" && d.Attributes.WWWRedirectType != "none" &&
+			!strings.HasPrefix(name, "www.") {
+			main = append(main, "www."+name)
+		}
+	}
+	return main, wildcard, reverb
+}
+
+// applyForgeDomainPolicy filters .on-forge.com hosts according to the forge-domain
+// opt-in flag, adjusts TLS settings if only forge domains remain, and logs skipped sites.
+func applyForgeDomainPolicy(
+	hosts []string,
+	includeForgeDomain bool,
+	enableTLS bool,
+	certResolver string,
+	siteName string,
+) (filtered []string, outTLS bool, outResolver string) {
+	outTLS = enableTLS
+	outResolver = certResolver
+
+	hasReal := false
+	for _, h := range hosts {
+		if strings.HasSuffix(h, ".on-forge.com") {
+			if includeForgeDomain {
+				filtered = append(filtered, h)
+			}
+		} else {
+			filtered = append(filtered, h)
+			hasReal = true
+		}
+	}
+
+	if len(filtered) == 0 {
+		log.Printf("Site %q has only .on-forge.com domains — skipping (use traefik:forge-domain=true to include)",
+			siteName)
+		return nil, false, ""
+	}
+
+	if !hasReal {
+		// Only forge domains opted in — disable TLS, Forge controls those certs.
+		log.Printf("Site %q uses only .on-forge.com domains — disabling TLS", siteName)
+		outTLS = false
+		outResolver = ""
+	}
+
+	return filtered, outTLS, outResolver
+}
+
+// appendAliases adds any tag aliases not already present in hosts.
+func appendAliases(hosts, aliases []string) []string {
+	existing := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		existing[h] = true
+	}
+	for _, a := range aliases {
+		if !existing[a] {
+			hosts = append(hosts, a)
+		}
+	}
+	return hosts
+}
+
+// siteDefaults holds the provider-level defaults applied before site tags are evaluated.
+type siteDefaults struct {
+	CertResolver string
+	SitesEnabled bool
+	HTTPRedirect bool
+	Port         int
+}
+
+// siteTagConfig is the resolved configuration for a single site after tag processing.
+type siteTagConfig struct {
+	Enabled            bool
+	CertResolver       string
+	EnableTLS          bool
+	Port               int
+	HTTPRedirect       bool
+	EntryPoints        []string
+	Aliases            []string
+	Middlewares        []string
+	ReverbPortOverride int
+	IncludeForgeDomain bool
+}
+
+// parseSiteTags resolves site-level tag overrides on top of provider defaults.
+func parseSiteTags(tags []string, defaults siteDefaults) siteTagConfig {
+	cfg := siteTagConfig{
+		Enabled:      defaults.SitesEnabled,
+		CertResolver: defaults.CertResolver,
+		EnableTLS:    defaults.CertResolver != "",
+		Port:         defaults.Port,
+		HTTPRedirect: defaults.HTTPRedirect,
+	}
+
+	for _, tag := range tags {
+		key, value, ok := ParseTagConfig(tag)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "enabled":
+			cfg.Enabled = value == "true"
+		case "cert-resolver", "certresolver":
+			cfg.CertResolver = value
+			cfg.EnableTLS = true
+		case "tls":
+			cfg.EnableTLS = value == "true"
+		case "port":
+			var port int
+			if n, _ := fmt.Sscanf(value, "%d", &port); n == 1 {
+				cfg.Port = port
+			}
+		case "http-redirect", "redirect":
+			cfg.HTTPRedirect = value == "true"
+		case "entrypoints", "entry-points":
+			for _, ep := range strings.Split(value, ",") {
+				if ep = strings.TrimSpace(ep); ep != "" {
+					cfg.EntryPoints = append(cfg.EntryPoints, ep)
+				}
+			}
+		case "aliases":
+			for _, a := range strings.Split(value, ",") {
+				if a = strings.TrimSpace(a); a != "" {
+					cfg.Aliases = append(cfg.Aliases, a)
+				}
+			}
+		case "reverb-port":
+			var port int
+			if n, _ := fmt.Sscanf(value, "%d", &port); n == 1 {
+				cfg.ReverbPortOverride = port
+			}
+		case "forge-domain":
+			cfg.IncludeForgeDomain = value == "true"
+		case "middlewares", "middleware":
+			for _, m := range strings.Split(value, ",") {
+				if m = strings.TrimSpace(m); m != "" {
+					cfg.Middlewares = append(cfg.Middlewares, m)
+				}
+			}
+		}
+	}
+
+	return cfg
+}
+
+// ParseTagConfig parses a Forge tag for configuration directives.
+// Format: "traefik:key=value" or "traefik:flag" (treated as key=true).
+// Returns key, value, and ok=true if it is a traefik tag.
+func ParseTagConfig(tag string) (key, value string, ok bool) {
+	const prefix = "traefik:"
+	if !strings.HasPrefix(tag, prefix) {
+		return "", "", false
+	}
+	content := strings.TrimPrefix(tag, prefix)
+	if content == "" {
+		return "", "", false
+	}
+	if idx := strings.Index(content, "="); idx > 0 {
+		return strings.TrimSpace(content[:idx]), strings.TrimSpace(content[idx+1:]), true
+	}
+	return strings.TrimSpace(content), "true", true
+}
+
+// ServerConfig holds configuration parsed from server-level tags.
+type ServerConfig struct {
+	UpstreamHost string
+	UpstreamPort int
+	TraefikID    string
+}
+
+// ParseServerTags parses server tags and returns the resolved ServerConfig.
+func ParseServerTags(tags []string) ServerConfig {
+	cfg := ServerConfig{UpstreamPort: 80}
+
+	for _, tag := range tags {
+		key, value, ok := ParseTagConfig(tag)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "upstream-host", "upstreamhost", "lb-host", "loadbalancer-host":
+			cfg.UpstreamHost = value
+		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
+			var port int
+			if n, _ := fmt.Sscanf(value, "%d", &port); n == 1 {
+				cfg.UpstreamPort = port
+			}
+		case "traefik", "traefik-id":
+			cfg.TraefikID = value
+		}
+	}
+
+	return cfg
 }
 
 // buildHostRule builds a Traefik v3 routing rule from a list of exact hosts and
-// a list of wildcard-enabled hosts. Wildcard hosts get an additional HostRegexp
-// clause matching any single-level subdomain (e.g. app.bounceiq.com).
-func buildHostRule(hosts []string, wildcardHosts []string) string {
+// wildcard-enabled hosts. Wildcard hosts get an additional HostRegexp clause
+// matching any single-level subdomain (e.g. app.example.com).
+func buildHostRule(hosts, wildcardHosts []string) string {
 	parts := make([]string, 0, len(hosts)+len(wildcardHosts))
 	for _, h := range hosts {
 		parts = append(parts, fmt.Sprintf("Host(`%s`)", h))
 	}
 	for _, h := range wildcardHosts {
-		// Escape dots for use in a Go regex, then match any single-level subdomain.
 		escaped := strings.ReplaceAll(h, ".", `\.`)
 		parts = append(parts, fmt.Sprintf("HostRegexp(`^[^.]+\\.%s$`)", escaped))
 	}
 	return strings.Join(parts, " || ")
 }
 
-func boolPtr(v bool) *bool {
-	return &v
-}
+func boolPtr(v bool) *bool { return &v }

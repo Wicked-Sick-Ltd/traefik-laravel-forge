@@ -241,20 +241,18 @@ func extractHostsFromConfig(path string) (map[string]bool, error) {
 		line := scanner.Text()
 		// Look for Host(`...`) anywhere in the line (handles YAML values and TOML values)
 		for {
-			idx := strings.Index(line, "Host(`")
-			if idx == -1 {
+			_, after, found := strings.Cut(line, "Host(`")
+			if !found {
 				break
 			}
-			rest := line[idx+len("Host(`"):]
-			end := strings.Index(rest, "`)")
-			if end == -1 {
+			host, rest, closed := strings.Cut(after, "`)")
+			if !closed {
 				break
 			}
-			host := strings.TrimSpace(rest[:end])
-			if host != "" {
-				hosts[host] = true
+			if h := strings.TrimSpace(host); h != "" {
+				hosts[h] = true
 			}
-			line = rest[end+2:]
+			line = rest
 		}
 	}
 	return hosts, scanner.Err()

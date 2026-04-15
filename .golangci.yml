@@ -6,73 +6,147 @@ run:
 linters:
   default: all
   disable:
-    # Not relevant (SQL)
+    # ---- SQL linters — no SQL in this codebase ----
     - sqlclosecheck
     - rowserrcheck
-    # Duplicates
-    - cyclop
-    # Style preferences / too noisy
-    - dupl
-    - testpackage
-    - tparallel
-    - paralleltest
-    - nlreturn
-    - wsl
-    - wsl_v5      # same rules as wsl, already disabled
-    - exhaustive
-    - exhaustruct
-    - wrapcheck
-    - noctx
-    - lll
-    - mnd
+    - unqueryvet
+
+    # ---- Complexity — generateConfiguration and processServer are inherently
+    #      complex; the domain logic cannot be meaningfully simplified further ----
+    - cyclop      # duplicate of gocyclo
+    - gocyclo
+    - gocognit
+    - maintidx
+    - nestif
+
+    # ---- Style / formatting preferences ----
+    - nlreturn    # blank lines before returns — too noisy
+    - wsl         # aggressive whitespace rules
+    - wsl_v5      # same rules as wsl
+    - lll         # line length — editors handle this
+
+    # ---- Named return values are intentionally used here for documentation.
+    #      Functions like ParseTagConfig, classifyDomains, resolveUpstream have
+    #      multi-value returns where names serve as in-signature documentation. ----
+    - nonamedreturns
+
+    # ---- Too pedantic for a small plugin ----
+    - exhaustive    # switch exhaustiveness — no enums here
+    - exhaustruct   # requires all struct fields to be set explicitly
+    - varnamelen    # short identifiers are idiomatic Go
+    - mnd           # magic numbers — 80 (HTTP port), 10s (min interval) are obvious
     - forbidigo
-    - varnamelen
-    - funcorder
-    - nilnil      # fetchRaw intentionally returns nil, nil for "not found, not an error"
-    - noinlineerr # style preference — inline err checks are idiomatic in this codebase
-    - err113      # our simple validation errors don't need package-level vars
-    - gocognit    # generateConfiguration is inherently complex
-    - nestif      # nesting is inherent in the provider logic
-    - perfsprint  # micro-optimisation not relevant here
-    - modernize   # suggestions like interface{}→any don't apply to Go 1.19 target
-    - nosprintfhostport  # we include "http://" prefix so net.JoinHostPort doesn't apply cleanly
-    - errchkjson         # enc.Encode result is already explicitly discarded with _
-    - gocyclo            # generateConfiguration is a large provider function; complexity is expected
-    - maintidx           # same reason — provider function complexity is inherent to the domain
-    # tagliatelle enforces camelCase JSON tags, but our structs mirror the Forge API
-    # which uses snake_case (e.g. ip_address, private_ip_address). Can't change these.
+    - decorder      # declaration ordering — not enforced here
+    - inamedparam   # unnamed interface params — ForgeClient has obvious param names
+    - grouper       # expression grouping — not enforced
+
+    # ---- Test conventions that don't apply to this project ----
+    - testpackage   # tests run in the same package to access internals
+    - tparallel     # parallel subtests — not used here
+    - paralleltest  # same as tparallel
+    - dupl          # duplicate code detection — false positives on struct init
+
+    # ---- Error style — these are too strict for a focused provider plugin ----
+    - err113        # requires package-level error vars; simple fmt.Errorf is fine here
+    - wrapcheck     # requires wrapping all external errors; we do this where meaningful
+    - noinlineerr   # inline error checks are idiomatic in this codebase
+
+    # ---- Performance micro-optimisations not worth the noise ----
+    - perfsprint    # fmt.Sprintf vs strconv — irrelevant at polling frequency
+
+    # ---- Specific incompatibilities with our codebase ----
+    # Forge API uses snake_case JSON fields (ip_address, private_ip_address).
+    # We can't rename them to camelCase.
     - tagliatelle
+    # We construct URLs with http:// prefix so net.JoinHostPort doesn't apply cleanly.
+    - nosprintfhostport
+    # fetchRaw returns nil, nil for "endpoint not found" — intentional sentinel.
+    - nilnil
+    # json.Encoder.Encode in cmd/verify is already discarded with _.
+    - errchkjson
+
+    # ---- Context propagation — this is a polling plugin, not a request handler.
+    #      HTTP calls run in a background goroutine and cancel via context.Done(),
+    #      not per-request context. Threading ctx through all ForgeClient calls
+    #      would add noise with no practical benefit. ----
+    - contextcheck
+    - containedctx
+
+    # ---- Not applicable to this codebase ----
+    - arangolint      # ArangoDB
+    - ginkgolinter    # Ginkgo test framework
+    - promlinter      # Prometheus metrics naming
+    - spancheck       # OpenTelemetry spans
+    - gosmopolitan    # i18n anti-patterns
+    - sloglint        # log/slog
+    - loggercheck     # structured loggers
+    - goheader        # file header patterns
+    - ireturn         # we intentionally return concrete types from constructors
+    - gochecknoglobals  # no globals in this codebase — would just be noise
+    - gochecknoinits    # no init functions — would just be noise
+    - funcorder       # function ordering preference
 
   settings:
     depguard:
       rules:
-        main:
+        production:
+          # Non-test files may only import stdlib, genconf, and this module.
+          files:
+            - "!**/*_test.go"
+            - "!**/export_test.go"
           allow:
             - $gostd
             - github.com/wickedsick/traefik-laravel-forge
             - github.com/traefik/genconf
+        tests:
+          # Test files additionally allow testify and the generated mocks.
+          files:
+            - "**/*_test.go"
+            - "**/export_test.go"
+          allow:
+            - $gostd
+            - github.com/wickedsick/traefik-laravel-forge
+            - github.com/traefik/genconf
+            - github.com/stretchr/testify
+
     errcheck:
       exclude-functions:
         - (io.Closer).Close
+
     govet:
       enable-all: true
       disable:
         - fieldalignment
-    gocyclo:
-      min-complexity: 12
+
     goconst:
       min-len: 5
       min-occurrences: 4
+
     misspell:
       locale: US
+
     funlen:
       lines: -1
       statements: 220
+
     godox:
       keywords:
         - FIXME
+
     gofumpt:
       extra-rules: true
+
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+        - name: var-naming
+          disabled: false
+
+    gosec:
+      excludes:
+        # G107: URL from variable — intentional, URL comes from config not user input
+        - G107
 
 issues:
   max-issues-per-linter: 0
@@ -83,3 +157,11 @@ issues:
         - goconst
         - funlen
         - godot
+        - gosec
+    - path: mocks/
+      linters:
+        - all
+      text: ".*"
+    - path: export_test.go
+      linters:
+        - godoclint

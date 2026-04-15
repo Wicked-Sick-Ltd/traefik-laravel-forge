@@ -2,6 +2,7 @@ package traefik_laravel_forge
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -10,9 +11,11 @@ const (
 	testOrganization = "test-org"
 )
 
+// -- Config / lifecycle tests (yaegi-compatible, no testify) --
+
 func TestNew(t *testing.T) {
 	config := CreateConfig()
-	config.PollInterval = "10s" // Use minimum valid interval
+	config.PollInterval = "10s"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
 
@@ -20,26 +23,20 @@ func TestNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	t.Cleanup(func() {
-		err = provider.Stop()
-		if err != nil {
+		if err = provider.Stop(); err != nil {
 			t.Fatal(err)
 		}
 	})
-
-	err = provider.Init()
-	if err != nil {
+	if err = provider.Init(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestNewMissingAPIToken(t *testing.T) {
 	config := CreateConfig()
-	config.PollInterval = "1s"
-	config.APIToken = "" // Missing token
+	config.APIToken = ""
 	config.Organization = testOrganization
-
 	_, err := New(context.Background(), config, "test")
 	if err == nil {
 		t.Fatal("expected error for missing API token, got nil")
@@ -48,10 +45,8 @@ func TestNewMissingAPIToken(t *testing.T) {
 
 func TestNewMissingOrganization(t *testing.T) {
 	config := CreateConfig()
-	config.PollInterval = "1s"
 	config.APIToken = testAPIToken
-	config.Organization = "" // Missing organization
-
+	config.Organization = ""
 	_, err := New(context.Background(), config, "test")
 	if err == nil {
 		t.Fatal("expected error for missing organization, got nil")
@@ -63,99 +58,109 @@ func TestNewInvalidPollInterval(t *testing.T) {
 	config.PollInterval = "invalid"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
-
 	_, err := New(context.Background(), config, "test")
 	if err == nil {
 		t.Fatal("expected error for invalid poll interval, got nil")
 	}
 }
 
-func TestInitInvalidPollInterval(t *testing.T) {
+func TestInitPollIntervalZero(t *testing.T) {
 	config := CreateConfig()
 	config.PollInterval = "0s"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
-
-	provider, err := New(context.Background(), config, "test")
+	p, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	err = provider.Init()
-	if err == nil {
+	if err = p.Init(); err == nil {
 		t.Fatal("expected error for zero poll interval in Init, got nil")
 	}
 }
 
 func TestInitPollIntervalTooShort(t *testing.T) {
 	config := CreateConfig()
-	config.PollInterval = "5s" // Less than 10s minimum
+	config.PollInterval = "5s"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
-
-	provider, err := New(context.Background(), config, "test")
+	p, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	err = provider.Init()
+	err = p.Init()
 	if err == nil {
 		t.Fatal("expected error for poll interval < 10s in Init, got nil")
 	}
-
-	// Check error message
-	expectedSubstring := "at least 10s"
-	if !contains(err.Error(), expectedSubstring) {
-		t.Fatalf("expected error containing %q, got: %v", expectedSubstring, err)
+	if !strings.Contains(err.Error(), "at least 10s") {
+		t.Fatalf("expected error containing %q, got: %v", "at least 10s", err)
 	}
 }
 
 func TestInitPollIntervalValid(t *testing.T) {
 	config := CreateConfig()
-	config.PollInterval = "10s" // Exactly 10s - should be valid
+	config.PollInterval = "10s"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
-
-	provider, err := New(context.Background(), config, "test")
+	p, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	err = provider.Init()
-	if err != nil {
-		t.Fatalf("expected no error for 10s poll interval, got: %v", err)
+	if err = p.Init(); err != nil {
+		t.Fatalf("unexpected error for 10s poll interval: %v", err)
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsSubstring(s, substr))
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-func TestTraefikIDFilter(t *testing.T) {
+func TestTraefikIDStoredOnProvider(t *testing.T) {
 	config := CreateConfig()
 	config.PollInterval = "10s"
 	config.APIToken = testAPIToken
 	config.Organization = testOrganization
 	config.TraefikID = "lb01"
-
-	provider, err := New(context.Background(), config, "test")
+	p, err := New(context.Background(), config, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if provider.traefikID != "lb01" {
-		t.Errorf("traefikID = %q, want %q", provider.traefikID, "lb01")
+	if p.traefikID != "lb01" {
+		t.Errorf("traefikID = %q, want %q", p.traefikID, "lb01")
 	}
 }
+
+// -- ParseTagConfig unit tests --
+
+func TestParseTagConfig(t *testing.T) {
+	tests := []struct {
+		tag       string
+		wantKey   string
+		wantValue string
+		wantOK    bool
+	}{
+		{"traefik:cert-resolver=letsencrypt", "cert-resolver", "letsencrypt", true},
+		{"traefik:tls=true", "tls", "true", true},
+		{"traefik:tls=false", "tls", "false", true},
+		{"traefik:enabled", "enabled", "true", true},
+		{"traefik:key=value=extra", "key", "value=extra", true},
+		{"production", "", "", false},
+		{"", "", "", false},
+		{"traefik:", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tag, func(t *testing.T) {
+			key, value, ok := ParseTagConfig(tt.tag)
+			if ok != tt.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if key != tt.wantKey {
+				t.Errorf("key = %q, want %q", key, tt.wantKey)
+			}
+			if value != tt.wantValue {
+				t.Errorf("value = %q, want %q", value, tt.wantValue)
+			}
+		})
+	}
+}
+
+// -- ParseServerTags unit tests --
 
 func TestParseServerTags(t *testing.T) {
 	tests := []struct {
@@ -170,24 +175,20 @@ func TestParseServerTags(t *testing.T) {
 			tags:             []string{"traefik:upstream-host=10.0.1.10", "traefik:upstream-port=8080"},
 			wantUpstreamHost: "10.0.1.10",
 			wantUpstreamPort: 8080,
-			wantTraefikID:    "",
 		},
 		{
-			name:             "only host, default port",
+			name:             "host only — port defaults to 80",
 			tags:             []string{"traefik:upstream-host=192.168.1.50"},
 			wantUpstreamHost: "192.168.1.50",
 			wantUpstreamPort: 80,
-			wantTraefikID:    "",
 		},
 		{
-			name:             "only port, no host",
+			name:             "port only — host empty",
 			tags:             []string{"traefik:upstream-port=9090"},
-			wantUpstreamHost: "",
 			wantUpstreamPort: 9090,
-			wantTraefikID:    "",
 		},
 		{
-			name:             "with traefik ID",
+			name:             "traefik-id",
 			tags:             []string{"traefik:upstream-host=10.0.1.10", "traefik:traefik-id=lb01"},
 			wantUpstreamHost: "10.0.1.10",
 			wantUpstreamPort: 80,
@@ -196,78 +197,320 @@ func TestParseServerTags(t *testing.T) {
 		{
 			name:             "no traefik tags",
 			tags:             []string{"production", "app-server"},
-			wantUpstreamHost: "",
 			wantUpstreamPort: 80,
-			wantTraefikID:    "",
 		},
 		{
 			name:             "empty tags",
 			tags:             []string{},
-			wantUpstreamHost: "",
 			wantUpstreamPort: 80,
-			wantTraefikID:    "",
 		},
 		{
-			name:             "backward compat: lb-host/lb-port aliases",
+			name:             "lb-host/lb-port aliases",
 			tags:             []string{"traefik:lb-host=10.0.0.1", "traefik:lb-port=3000"},
 			wantUpstreamHost: "10.0.0.1",
 			wantUpstreamPort: 3000,
-			wantTraefikID:    "",
 		},
 		{
-			name:             "backward compat: loadbalancer aliases",
+			name:             "loadbalancer aliases",
 			tags:             []string{"traefik:loadbalancer-host=10.0.0.2", "traefik:loadbalancer-port=4000"},
 			wantUpstreamHost: "10.0.0.2",
 			wantUpstreamPort: 4000,
-			wantTraefikID:    "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := ParseServerTags(tt.tags)
-			if cfg.UpstreamHost != tt.wantUpstreamHost {
-				t.Errorf("UpstreamHost = %q, want %q", cfg.UpstreamHost, tt.wantUpstreamHost)
+			got := ParseServerTags(tt.tags)
+			if got.UpstreamHost != tt.wantUpstreamHost {
+				t.Errorf("UpstreamHost = %q, want %q", got.UpstreamHost, tt.wantUpstreamHost)
 			}
-			if cfg.UpstreamPort != tt.wantUpstreamPort {
-				t.Errorf("UpstreamPort = %d, want %d", cfg.UpstreamPort, tt.wantUpstreamPort)
+			if got.UpstreamPort != tt.wantUpstreamPort {
+				t.Errorf("UpstreamPort = %d, want %d", got.UpstreamPort, tt.wantUpstreamPort)
 			}
-			if cfg.TraefikID != tt.wantTraefikID {
-				t.Errorf("TraefikID = %q, want %q", cfg.TraefikID, tt.wantTraefikID)
+			if got.TraefikID != tt.wantTraefikID {
+				t.Errorf("TraefikID = %q, want %q", got.TraefikID, tt.wantTraefikID)
 			}
 		})
 	}
 }
 
-func TestParseTagConfig(t *testing.T) {
+// -- buildHostRule unit tests --
+
+func TestBuildHostRule(t *testing.T) {
 	tests := []struct {
-		tag       string
-		wantKey   string
-		wantValue string
-		wantOK    bool
+		name     string
+		hosts    []string
+		wildcard []string
+		want     string
 	}{
-		{"traefik:cert-resolver=letsencrypt", "cert-resolver", "letsencrypt", true},
-		{"traefik:tls=true", "tls", "true", true},
-		{"traefik:tls=false", "tls", "false", true},
-		{"traefik:enabled", "enabled", "true", true},
-		{"production", "", "", false},
-		{"", "", "", false},
-		{"traefik:", "", "", false},
-		{"traefik:key=value=extra", "key", "value=extra", true},
+		{
+			name:  "single host",
+			hosts: []string{"example.com"},
+			want:  "Host(`example.com`)",
+		},
+		{
+			name:  "multiple hosts",
+			hosts: []string{"example.com", "www.example.com"},
+			want:  "Host(`example.com`) || Host(`www.example.com`)",
+		},
+		{
+			name:     "host with wildcard",
+			hosts:    []string{"example.com"},
+			wildcard: []string{"example.com"},
+			want:     `Host(` + "`example.com`" + `) || HostRegexp(` + "`^[^.]+\\.example\\.com$`" + `)`,
+		},
+		{
+			name:     "multiple hosts one wildcard",
+			hosts:    []string{"example.com", "other.com"},
+			wildcard: []string{"example.com"},
+			want: "Host(`example.com`) || Host(`other.com`) || " +
+				"HostRegexp(`^[^.]+\\.example\\.com$`)",
+		},
+		{
+			name:  "empty",
+			hosts: []string{},
+			want:  "",
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.tag, func(t *testing.T) {
-			key, value, ok := ParseTagConfig(tt.tag)
-			if ok != tt.wantOK {
-				t.Errorf("ParseTagConfig(%q) ok = %v, want %v", tt.tag, ok, tt.wantOK)
-			}
-			if key != tt.wantKey {
-				t.Errorf("ParseTagConfig(%q) key = %q, want %q", tt.tag, key, tt.wantKey)
-			}
-			if value != tt.wantValue {
-				t.Errorf("ParseTagConfig(%q) value = %q, want %q", tt.tag, value, tt.wantValue)
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildHostRule(tt.hosts, tt.wildcard)
+			if got != tt.want {
+				t.Errorf("buildHostRule() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// -- buildTagMap unit tests --
+
+func TestBuildTagMap(t *testing.T) {
+	included := []any{
+		map[string]any{
+			"type": "tags",
+			"id":   "1",
+			"attributes": map[string]any{
+				"name": "traefik:upstream-host=10.0.0.1",
+			},
+		},
+		map[string]any{
+			"type": "tags",
+			"id":   "2",
+			"attributes": map[string]any{
+				"name": "production",
+			},
+		},
+		// non-tag item should be ignored
+		map[string]any{
+			"type": "servers",
+			"id":   "3",
+		},
+		// item with empty ID should be ignored
+		map[string]any{
+			"type":       "tags",
+			"id":         "",
+			"attributes": map[string]any{"name": "orphan"},
+		},
+	}
+
+	got := buildTagMap(included)
+
+	if got["1"] != "traefik:upstream-host=10.0.0.1" {
+		t.Errorf("tag 1 = %q, want %q", got["1"], "traefik:upstream-host=10.0.0.1")
+	}
+	if got["2"] != "production" {
+		t.Errorf("tag 2 = %q, want %q", got["2"], "production")
+	}
+	if _, exists := got["3"]; exists {
+		t.Error("non-tag item should not appear in tag map")
+	}
+	if len(got) != 2 {
+		t.Errorf("tag map length = %d, want 2", len(got))
+	}
+}
+
+// -- parseSiteTags unit tests --
+
+func TestParseSiteTags(t *testing.T) {
+	defaults := siteDefaults{
+		CertResolver: "cloudflare",
+		SitesEnabled: true,
+		HTTPRedirect: true,
+		Port:         80,
+	}
+
+	t.Run("no tags — all defaults applied", func(t *testing.T) {
+		got := parseSiteTags(nil, defaults)
+		if !got.Enabled {
+			t.Error("Enabled should be true by default")
+		}
+		if got.CertResolver != "cloudflare" {
+			t.Errorf("CertResolver = %q, want %q", got.CertResolver, "cloudflare")
+		}
+		if !got.EnableTLS {
+			t.Error("EnableTLS should be true when CertResolver is set")
+		}
+		if got.Port != 80 {
+			t.Errorf("Port = %d, want 80", got.Port)
+		}
+		if !got.HTTPRedirect {
+			t.Error("HTTPRedirect should be true by default")
+		}
+	})
+
+	t.Run("enabled=false disables site", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:enabled=false"}, defaults)
+		if got.Enabled {
+			t.Error("Enabled should be false after tag override")
+		}
+	})
+
+	t.Run("cert-resolver override also sets EnableTLS", func(t *testing.T) {
+		noTLSDefaults := siteDefaults{SitesEnabled: true, HTTPRedirect: false, Port: 80}
+		got := parseSiteTags([]string{"traefik:cert-resolver=letsencrypt"}, noTLSDefaults)
+		if got.CertResolver != "letsencrypt" {
+			t.Errorf("CertResolver = %q, want letsencrypt", got.CertResolver)
+		}
+		if !got.EnableTLS {
+			t.Error("EnableTLS should be true when cert-resolver tag is set")
+		}
+	})
+
+	t.Run("tls=false overrides cert resolver", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:tls=false"}, defaults)
+		if got.EnableTLS {
+			t.Error("EnableTLS should be false after tls=false tag")
+		}
+	})
+
+	t.Run("port override", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:port=3000"}, defaults)
+		if got.Port != 3000 {
+			t.Errorf("Port = %d, want 3000", got.Port)
+		}
+	})
+
+	t.Run("http-redirect=false overrides global", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:http-redirect=false"}, defaults)
+		if got.HTTPRedirect {
+			t.Error("HTTPRedirect should be false after tag override")
+		}
+	})
+
+	t.Run("entrypoints parsed", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:entrypoints=web,websecure"}, defaults)
+		if len(got.EntryPoints) != 2 || got.EntryPoints[0] != "web" || got.EntryPoints[1] != "websecure" {
+			t.Errorf("EntryPoints = %v, want [web websecure]", got.EntryPoints)
+		}
+	})
+
+	t.Run("aliases parsed", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:aliases=api.example.com,app.example.com"}, defaults)
+		if len(got.Aliases) != 2 {
+			t.Errorf("Aliases = %v, want 2 entries", got.Aliases)
+		}
+	})
+
+	t.Run("middlewares and middleware alias", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:middlewares=auth,rate-limit"}, defaults)
+		if len(got.Middlewares) != 2 || got.Middlewares[0] != "auth" {
+			t.Errorf("Middlewares = %v, want [auth rate-limit]", got.Middlewares)
+		}
+	})
+
+	t.Run("reverb-port override", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:reverb-port=8081"}, defaults)
+		if got.ReverbPortOverride != 8081 {
+			t.Errorf("ReverbPortOverride = %d, want 8081", got.ReverbPortOverride)
+		}
+	})
+
+	t.Run("forge-domain opt-in", func(t *testing.T) {
+		got := parseSiteTags([]string{"traefik:forge-domain=true"}, defaults)
+		if !got.IncludeForgeDomain {
+			t.Error("IncludeForgeDomain should be true")
+		}
+	})
+}
+
+// -- classifyDomains unit tests --
+
+func TestClassifyDomains(t *testing.T) {
+	domains := []ForgeDomain{
+		{Attributes: ForgeDomainAttributes{Name: "example.com", Status: "enabled", DomainType: "primary"}},
+		{Attributes: ForgeDomainAttributes{Name: "www.example.com", Status: "enabled", DomainType: "alias"}},
+		{Attributes: ForgeDomainAttributes{Name: "ws.example.com", Status: "enabled", DomainType: "alias"}},
+		{Attributes: ForgeDomainAttributes{Name: "disabled.com", Status: "disabled", DomainType: "primary"}},
+	}
+
+	main, wildcard, reverb := classifyDomains(domains, "ws.example.com")
+
+	if len(main) != 2 {
+		t.Errorf("main hosts = %v, want 2", main)
+	}
+	if len(reverb) != 1 || reverb[0] != "ws.example.com" {
+		t.Errorf("reverb hosts = %v, want [ws.example.com]", reverb)
+	}
+	if len(wildcard) != 0 {
+		t.Errorf("wildcard hosts = %v, want empty", wildcard)
+	}
+}
+
+func TestClassifyDomainsWildcard(t *testing.T) {
+	domains := []ForgeDomain{
+		{Attributes: ForgeDomainAttributes{
+			Name:                    "example.com",
+			Status:                  "enabled",
+			AllowWildcardSubdomains: true,
+		}},
+	}
+
+	main, wildcard, reverb := classifyDomains(domains, "")
+
+	if len(main) != 1 || main[0] != "example.com" {
+		t.Errorf("main = %v, want [example.com]", main)
+	}
+	if len(wildcard) != 1 || wildcard[0] != "example.com" {
+		t.Errorf("wildcard = %v, want [example.com]", wildcard)
+	}
+	if len(reverb) != 0 {
+		t.Errorf("reverb = %v, want empty", reverb)
+	}
+}
+
+func TestClassifyDomainsWWWRedirect(t *testing.T) {
+	domains := []ForgeDomain{
+		{Attributes: ForgeDomainAttributes{
+			Name:            "example.com",
+			Status:          "enabled",
+			WWWRedirectType: "to-www",
+		}},
+	}
+
+	main, _, _ := classifyDomains(domains, "")
+
+	if len(main) != 2 {
+		t.Fatalf("main = %v, want [example.com, www.example.com]", main)
+	}
+	if main[1] != "www.example.com" {
+		t.Errorf("main[1] = %q, want www.example.com", main[1])
+	}
+}
+
+func TestClassifyDomainsWWWRedirectSkipsWWWPrefix(t *testing.T) {
+	// A domain already starting with "www." should not get another www. prepended.
+	domains := []ForgeDomain{
+		{Attributes: ForgeDomainAttributes{
+			Name:            "www.example.com",
+			Status:          "enabled",
+			WWWRedirectType: "from-www",
+		}},
+	}
+
+	main, _, _ := classifyDomains(domains, "")
+
+	if len(main) != 1 {
+		t.Errorf("main = %v, want only [www.example.com]", main)
 	}
 }
