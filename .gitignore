@@ -1,4 +1,11 @@
+# IDEs
 .idea/
+.vscode/
+
+# Claude Code local settings
+.claude/
+
+# Test and debug output
 coverage.out
 dump*.json
 verify.out
