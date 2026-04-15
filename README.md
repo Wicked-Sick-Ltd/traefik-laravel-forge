@@ -11,6 +11,7 @@ A [Traefik](https://traefik.io) provider plugin that automatically generates HTT
 - [Installation](#installation)
 - [Minimal configuration](#minimal-configuration)
 - [Plugin configuration reference](#plugin-configuration-reference)
+- [Multiple load balancers](#multiple-load-balancers)
 - [Forge tags](#forge-tags)
   - [Site tags](#site-tags)
   - [Server tags](#server-tags)
@@ -123,6 +124,7 @@ That's all that's needed. The plugin discovers your servers and sites automatica
 | `defaultSitesEnabled` | bool | `true` | Set to `false` for opt-in mode: only sites with `traefik:enabled` tag are routed |
 | `httpRedirect` | bool | `false` | Generate HTTP→HTTPS redirect routers for all sites |
 | `redirectMiddleware` | string | `""` | Name of an externally-defined redirect middleware to use. If empty and `httpRedirect` is `true`, the plugin creates `forge-https-redirect` automatically |
+| `traefikID` | string | `""` | When set, only process servers tagged `traefik:traefik-id=<value>`. Use this in multi-LB setups so each Traefik instance only routes its own servers. Servers with no matching tag are skipped |
 | `serverMappings` | array | `[]` | Optional: explicitly set the upstream host/port for specific servers (tags take priority over this) |
 
 ### serverMappings
@@ -135,6 +137,25 @@ serverMappings:
     upstreamHost: "10.0.1.10"  # override auto-detected IP
     upstreamPort: 8080          # override default port 80
 ```
+
+## Multiple load balancers
+
+When running more than one Traefik instance, set `traefikID` so each instance only routes the servers assigned to it.
+
+**On each Traefik instance** (`traefik.yml`):
+```yaml
+providers:
+  plugin:
+    forge:
+      traefikID: "lb01"   # this instance only processes servers tagged traefik:traefik-id=lb01
+```
+
+**In Forge**, tag each server with which LB owns it:
+```
+traefik:traefik-id=lb01
+```
+
+Servers with no `traefik:traefik-id` tag (or a non-matching value) are skipped entirely when `traefikID` is configured — so every server should be explicitly assigned in multi-LB setups.
 
 ## Forge tags
 

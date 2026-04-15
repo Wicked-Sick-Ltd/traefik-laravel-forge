@@ -166,11 +166,14 @@ Aliases: `traefik:lb-port`, `traefik:loadbalancer-port`
 
 ### `traefik:traefik-id`
 
-Informational — identify which Traefik instance handles this server. Not used in routing decisions.
+Assign this server to a specific Traefik instance. When the plugin is configured with `traefikID: "lb01"`, it only processes servers carrying a matching `traefik:traefik-id=lb01` tag — all others are skipped.
 
 ```
 traefik:traefik-id=lb01
+traefik:traefik-id=lb02
 ```
+
+Has no effect when `traefikID` is not set in the plugin config (single-LB mode).
 
 ---
 

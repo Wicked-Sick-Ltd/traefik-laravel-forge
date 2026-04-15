@@ -140,6 +140,23 @@ func containsSubstring(s, substr string) bool {
 	return false
 }
 
+func TestTraefikIDFilter(t *testing.T) {
+	config := CreateConfig()
+	config.PollInterval = "10s"
+	config.APIToken = testAPIToken
+	config.Organization = testOrganization
+	config.TraefikID = "lb01"
+
+	provider, err := New(context.Background(), config, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if provider.traefikID != "lb01" {
+		t.Errorf("traefikID = %q, want %q", provider.traefikID, "lb01")
+	}
+}
+
 func TestParseServerTags(t *testing.T) {
 	tests := []struct {
 		name             string

@@ -33,6 +33,7 @@ type Config struct {
 	DefaultSitesEnabled bool            `json:"defaultSitesEnabled,omitempty"` // Default: true - whether sites are enabled by default
 	HTTPRedirect        bool            `json:"httpRedirect,omitempty"`        // Create HTTP->HTTPS redirect routers
 	RedirectMiddleware  string          `json:"redirectMiddleware,omitempty"`  // Name of redirect middleware to use
+	TraefikID           string          `json:"traefikID,omitempty"`           // Only process servers tagged traefik:traefik-id=<this value>
 	ServerMappings      []ServerMapping `json:"serverMappings,omitempty"`
 }
 
@@ -156,6 +157,7 @@ type Provider struct {
 	defaultSitesEnabled bool
 	httpRedirect        bool
 	redirectMiddleware  string
+	traefikID           string
 	serverMappings      []ServerMapping
 	httpClient          *http.Client
 
@@ -186,6 +188,7 @@ func New(_ context.Context, config *Config, name string) (*Provider, error) {
 		defaultSitesEnabled: config.DefaultSitesEnabled,
 		httpRedirect:        config.HTTPRedirect,
 		redirectMiddleware:  config.RedirectMiddleware,
+		traefikID:           config.TraefikID,
 		serverMappings:      config.ServerMappings,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -542,6 +545,14 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	for _, server := range servers {
 		// Parse tags first (highest priority)
 		tagConfig := ParseServerTags(server.Attributes.Tags)
+
+		// If traefikID filtering is active, skip servers that don't carry a matching tag.
+		// Servers with no traefik:traefik-id tag are also skipped — in multi-LB setups
+		// every server should be explicitly assigned.
+		if p.traefikID != "" && tagConfig.TraefikID != p.traefikID {
+			fmt.Printf("Server '%s' skipped (traefik-id=%q, want %q)\n", server.Attributes.Name, tagConfig.TraefikID, p.traefikID)
+			continue
+		}
 
 		// Find the mapping for this server (fallback to config file)
 		var mapping *ServerMapping

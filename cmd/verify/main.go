@@ -27,6 +27,7 @@ func main() {
 	sitesEnabled := flag.Bool("default-sites-enabled", true, "Whether sites are enabled by default")
 	httpRedirect := flag.Bool("http-redirect", false, "Generate HTTP->HTTPS redirect routers")
 	redirectMiddleware := flag.String("redirect-middleware", "", "Name of redirect middleware to use with http-redirect")
+	traefikID := flag.String("traefik-id", "", "Only process servers tagged traefik:traefik-id=<value> (for multi-LB setups)")
 	comparePath := flag.String("compare", "", "Path to existing Traefik dynamic config file (.yml) to compare against")
 	jsonOut := flag.Bool("json", false, "Output generated config as JSON")
 	dumpRaw := flag.Bool("dump", false, "Dump raw Forge API responses as JSON (useful for inspecting available fields)")
@@ -48,6 +49,7 @@ func main() {
 	cfg.DefaultSitesEnabled = *sitesEnabled
 	cfg.HTTPRedirect = *httpRedirect
 	cfg.RedirectMiddleware = *redirectMiddleware
+	cfg.TraefikID = *traefikID
 
 	provider, err := forge.New(context.Background(), cfg, "verify")
 	if err != nil {
