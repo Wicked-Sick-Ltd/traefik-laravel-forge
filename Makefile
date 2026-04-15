@@ -11,7 +11,7 @@ test:
 	go test -v -cover ./...
 
 yaegi_test:
-	yaegi test .
+	GOPATH=$(GOPATH):$(shell pwd)/vendor yaegi test .
 
 vendor:
 	go mod vendor
