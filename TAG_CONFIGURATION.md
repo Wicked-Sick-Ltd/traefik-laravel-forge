@@ -124,6 +124,22 @@ Aliases: `traefik:middleware`
 
 ---
 
+### `traefik:forge-domain`
+
+By default, `.on-forge.com` domains are excluded from routing — Forge manages DNS and TLS for these subdomains, and their DNS may not point to your load balancer. This tag opts a site into `.on-forge.com` routing.
+
+```
+traefik:forge-domain=true
+```
+
+**Site with only `.on-forge.com` domains (no custom domain set yet):**
+Without this tag, the site is skipped entirely. With it, the site is routed on HTTP only — TLS is disabled since we can't obtain certs for domains we don't control.
+
+**Site with real custom domains alongside `.on-forge.com`:**
+Without this tag, the `.on-forge.com` domain is silently dropped from the Host() rule and the real domains are routed normally. With the tag, the `.on-forge.com` domain is included in the rule alongside the real ones.
+
+---
+
 ### `traefik:reverb-port`
 
 Override the Reverb WebSocket port. The plugin auto-detects the port from Forge's Reverb integration config — use this tag only if the detected port is wrong.
@@ -180,6 +196,16 @@ Has no effect when `traefikID` is not set in the plugin config (single-LB mode).
 ## Forge configuration auto-behaviours
 
 These are not tags — they are settings you configure in the Forge UI that the plugin reads automatically when fetching domain records.
+
+### .on-forge.com domains
+
+Forge assigns every site an `.on-forge.com` subdomain (e.g. `myapp-abc123.on-forge.com`). These are excluded from routing by default because:
+- Forge controls DNS and TLS for them — we can't obtain certs for them
+- Their DNS may not point to your load balancer
+
+Sites where `.on-forge.com` is the only domain are **skipped entirely** unless `traefik:forge-domain=true` is set. Sites with real custom domains simply have the `.on-forge.com` entry dropped from their Host() rule. Use `traefik:forge-domain=true` to opt in if needed (see the site tags section below).
+
+---
 
 ### Wildcard subdomains
 

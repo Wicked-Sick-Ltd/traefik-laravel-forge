@@ -675,6 +675,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			var tagAliases []string      // extra hosts from traefik:aliases= tag
 			var tagMiddlewares []string  // extra middlewares from traefik:middlewares= tag
 			reverbPortOverride := 0      // traefik:reverb-port= tag
+			includeForgeDomain := false  // traefik:forge-domain=true opts .on-forge.com into routing
 
 			for _, tag := range site.Attributes.Tags {
 				key, value, isTraefikTag := ParseTagConfig(tag)
@@ -717,6 +718,9 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					if n, err := fmt.Sscanf(value, "%d", &reverbPortOverride); err == nil && n == 1 {
 						fmt.Printf("Site '%s' reverb port overridden to %d via tag\n", site.Attributes.Name, reverbPortOverride)
 					}
+				case "forge-domain":
+					includeForgeDomain = value == "true"
+					fmt.Printf("Site '%s' .on-forge.com domain %s via tag\n", site.Attributes.Name, map[bool]string{true: "included", false: "excluded"}[includeForgeDomain])
 				case "middlewares", "middleware":
 					for _, m := range strings.Split(value, ",") {
 						if m = strings.TrimSpace(m); m != "" {
@@ -788,6 +792,47 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			// If no domain records came back, fall back to the Forge site name.
 			if len(mainHosts) == 0 {
 				mainHosts = []string{site.Attributes.Name}
+			}
+
+			// Handle .on-forge.com domains.
+			// These are Forge-managed subdomains: Forge controls TLS for them and their
+			// DNS may not point to this load balancer, so we skip them by default.
+			//
+			// Rules:
+			//  - .on-forge.com hosts are excluded from the router unless includeForgeDomain is true.
+			//  - If real (custom) domains remain after filtering, TLS applies normally.
+			//  - If only .on-forge.com hosts remain (includeForgeDomain forced them in), TLS is
+			//    disabled — we can't obtain certs for domains we don't control.
+			//  - If no valid hosts remain at all, skip the site entirely.
+			var filteredHosts []string
+			hasRealDomain := false
+
+			for _, h := range mainHosts {
+				if strings.HasSuffix(h, ".on-forge.com") {
+					if includeForgeDomain {
+						filteredHosts = append(filteredHosts, h)
+					}
+				} else {
+					filteredHosts = append(filteredHosts, h)
+					hasRealDomain = true
+				}
+			}
+
+			if len(filteredHosts) == 0 {
+				fmt.Printf("Site '%s' has no valid domains (only .on-forge.com, use traefik:forge-domain=true to include) — skipping\n", site.Attributes.Name)
+				continue
+			}
+
+			mainHosts = filteredHosts
+
+			if !hasRealDomain {
+				// Only .on-forge.com hosts — disable cert resolver.
+				// Forge manages TLS for these via its own infrastructure.
+				if certResolver != "" || enableTLS {
+					fmt.Printf("Site '%s' uses only .on-forge.com domains — disabling TLS\n", site.Attributes.Name)
+					certResolver = ""
+					enableTLS = false
+				}
 			}
 
 			// Append any hosts from traefik:aliases= tag not already present.
