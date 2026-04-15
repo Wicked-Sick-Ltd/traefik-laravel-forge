@@ -118,10 +118,11 @@ type ForgeDomain struct {
 // ForgeDomainAttributes holds domain record details.
 // DomainType is one of: "primary", "alias", "reverb".
 type ForgeDomainAttributes struct {
-	Name                  string `json:"name"`
-	DomainType            string `json:"type"`
-	Status                string `json:"status"`
-	AllowWildcardSubdomains bool  `json:"allow_wildcard_subdomains"`
+	Name                    string `json:"name"`
+	DomainType              string `json:"type"`
+	Status                  string `json:"status"`
+	AllowWildcardSubdomains bool   `json:"allow_wildcard_subdomains"`
+	WWWRedirectType         string `json:"www_redirect_type"` // "none", "from-www", or "to-www"
 }
 
 // ForgeDomainsResponse is the JSON:API response from the /domains endpoint.
@@ -771,6 +772,15 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 					mainHosts = append(mainHosts, d.Attributes.Name)
 					if d.Attributes.AllowWildcardSubdomains {
 						wildcardHosts = append(wildcardHosts, d.Attributes.Name)
+					}
+					// If Forge is managing a www redirect for this domain, Traefik must
+					// accept traffic on both the apex and www so the request reaches Nginx.
+					if d.Attributes.WWWRedirectType != "" && d.Attributes.WWWRedirectType != "none" {
+						wwwHost := "www." + d.Attributes.Name
+						if !strings.HasPrefix(d.Attributes.Name, "www.") {
+							mainHosts = append(mainHosts, wwwHost)
+							fmt.Printf("Added %s to router rule (www_redirect_type=%s)\n", wwwHost, d.Attributes.WWWRedirectType)
+						}
 					}
 				}
 			}
