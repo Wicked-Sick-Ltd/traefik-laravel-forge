@@ -57,7 +57,7 @@ Add to `traefik.yml`:
 experimental:
   plugins:
     forge:
-      moduleName: github.com/wickedsick/traefik-laravel-forge
+      moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
       version: v1.0.0
 
 providers:

@@ -96,7 +96,7 @@ linters:
             - "!**/export_test.go"
           allow:
             - $gostd
-            - github.com/wickedsick/traefik-laravel-forge
+            - github.com/Wicked-Sick-Ltd/traefik-laravel-forge
             - github.com/traefik/genconf
         tests:
           # Test files additionally allow testify and the generated mocks.
@@ -105,7 +105,7 @@ linters:
             - "**/export_test.go"
           allow:
             - $gostd
-            - github.com/wickedsick/traefik-laravel-forge
+            - github.com/Wicked-Sick-Ltd/traefik-laravel-forge
             - github.com/traefik/genconf
             - github.com/stretchr/testify
 

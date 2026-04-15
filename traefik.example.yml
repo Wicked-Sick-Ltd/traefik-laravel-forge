@@ -78,11 +78,11 @@ providers:
 experimental:
   plugins:
     forge:
-      moduleName: github.com/wickedsick/traefik-laravel-forge
+      moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
       version: v1.0.0
 
 # For local/development mode (clone the repo first):
 # experimental:
 #   localPlugins:
 #     forge:
-#       moduleName: github.com/wickedsick/traefik-laravel-forge
+#       moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge

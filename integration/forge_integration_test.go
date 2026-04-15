@@ -7,8 +7,8 @@ package integration
 import (
 	"testing"
 
-	forge "github.com/wickedsick/traefik-laravel-forge"
-	"github.com/wickedsick/traefik-laravel-forge/mocks"
+	forge "github.com/Wicked-Sick-Ltd/traefik-laravel-forge"
+	"github.com/Wicked-Sick-Ltd/traefik-laravel-forge/mocks"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

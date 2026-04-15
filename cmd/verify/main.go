@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	forge "github.com/wickedsick/traefik-laravel-forge"
+	forge "github.com/Wicked-Sick-Ltd/traefik-laravel-forge"
 )
 
 func main() {

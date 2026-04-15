@@ -1,4 +1,4 @@
-module github.com/wickedsick/traefik-laravel-forge
+module github.com/Wicked-Sick-Ltd/traefik-laravel-forge
 
 go 1.22
 

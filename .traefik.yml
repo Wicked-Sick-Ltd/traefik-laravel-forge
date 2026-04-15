@@ -1,7 +1,7 @@
 displayName: Laravel Forge Provider
 type: provider
 
-import: github.com/wickedsick/traefik-laravel-forge
+import: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
 
 summary: 'Automatically create Traefik routers from Laravel Forge sites. Configure via tags or config file with auto-IP detection and TLS support.'
 

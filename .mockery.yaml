@@ -3,7 +3,7 @@ resolve-type-alias: false
 disable-version-string: true
 issue-845-fix: true
 packages:
-  github.com/wickedsick/traefik-laravel-forge:
+  github.com/Wicked-Sick-Ltd/traefik-laravel-forge:
     interfaces:
       ForgeClient:
         config:

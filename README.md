@@ -58,7 +58,7 @@ No `serverMappings` config is required — the plugin discovers everything from 
 experimental:
   plugins:
     forge:
-      moduleName: github.com/wickedsick/traefik-laravel-forge
+      moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
       version: v1.0.0
 ```
 
@@ -66,8 +66,8 @@ experimental:
 
 ```bash
 mkdir -p ./plugins-local/src/github.com/wickedsick
-git clone https://github.com/wickedsick/traefik-laravel-forge \
-  ./plugins-local/src/github.com/wickedsick/traefik-laravel-forge
+git clone https://github.com/Wicked-Sick-Ltd/traefik-laravel-forge \
+  ./plugins-local/src/github.com/Wicked-Sick-Ltd/traefik-laravel-forge
 ```
 
 ```yaml
@@ -75,7 +75,7 @@ git clone https://github.com/wickedsick/traefik-laravel-forge \
 experimental:
   localPlugins:
     forge:
-      moduleName: github.com/wickedsick/traefik-laravel-forge
+      moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
 ```
 
 ## Minimal configuration
@@ -99,7 +99,7 @@ certificatesResolvers:
 experimental:
   plugins:
     forge:
-      moduleName: github.com/wickedsick/traefik-laravel-forge
+      moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
       version: v1.0.0
 
 providers:
