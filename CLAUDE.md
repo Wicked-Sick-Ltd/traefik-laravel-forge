@@ -93,10 +93,15 @@ No `serverMappings` — everything auto-detected. No `redirectMiddleware` — pl
 
 ## Documentation maintenance
 
-**Keep docs in sync with the code.** When adding or changing features, update these files:
+**Keep docs in sync with the code. Documentation updates must be in the same commit as the code change — never defer them.**
 
-- **README.md** — if adding a new plugin config option or changing how the plugin works overall
-- **TAG_CONFIGURATION.md** — if adding, removing, or changing any tag (site or server). This is the canonical tag reference.
+When adding or changing features, update these files:
+
+- **README.md** — if adding a new plugin config option, changing how the plugin works overall, or adding a new auto-discovered behaviour from Forge
+- **TAG_CONFIGURATION.md** — for ANY of the following:
+  - Adding, removing, or changing a tag (site or server)
+  - Adding or changing a behaviour that is driven by a Forge configuration option rather than a tag (e.g. wildcard subdomains, www redirects, Reverb integration). These go in the "Forge configuration auto-behaviours" section.
+  - Changing what the plugin reads from the Forge API and how it affects routing
 - **MIGRATION_FROM_STATIC.md** — if the migration story changes (new categories of what the plugin handles vs. what stays static)
 - **traefik.example.yml** — if adding config options or changing the recommended setup
 

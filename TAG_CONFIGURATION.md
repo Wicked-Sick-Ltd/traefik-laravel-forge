@@ -177,6 +177,36 @@ Has no effect when `traefikID` is not set in the plugin config (single-LB mode).
 
 ---
 
+## Forge configuration auto-behaviours
+
+These are not tags — they are settings you configure in the Forge UI that the plugin reads automatically when fetching domain records.
+
+### Wildcard subdomains
+
+If a domain record in Forge has **Allow Wildcard Subdomains** enabled, the plugin appends a `HostRegexp` rule for all single-level subdomains (Traefik v3 syntax):
+
+```
+Host(`example.com`) || HostRegexp(`^[^.]+\.example\.com$`)
+```
+
+Configured in Forge under Sites → your site → Domains → edit the primary domain.
+
+### www redirects
+
+If a domain record has **WWW Redirect** set to `from-www` or `to-www`, the plugin adds `www.<domain>` to the router's Host() rule:
+
+```
+Host(`example.com`) || Host(`www.example.com`)
+```
+
+Traefik must route both the apex and `www.` variant to the backend regardless of redirect direction, since the redirect itself is performed by Nginx on the Forge server. Configured in Forge under Sites → your site → Domains → edit the primary domain.
+
+### Reverb WebSocket
+
+If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain pointing to the configured port. Override the port with `traefik:reverb-port=` if needed.
+
+---
+
 ## Configuration priority
 
 For any given setting, the first matching source wins:

@@ -18,6 +18,7 @@ A [Traefik](https://traefik.io) provider plugin that automatically generates HTT
   - [Configuration priority](#configuration-priority)
 - [Auto-discovered routing](#auto-discovered-routing)
   - [Domains](#domains)
+  - [www redirects](#www-redirects)
   - [Reverb WebSocket](#reverb-websocket)
 - [What to keep in static config](#what-to-keep-in-static-config)
 - [Verification tool](#verification-tool)
@@ -216,6 +217,16 @@ Host(`example.com`) || HostRegexp(`^[^.]+\.example\.com$`)
 ```
 
 This covers `app.example.com`, `www.example.com`, etc. without any additional configuration.
+
+### www redirects
+
+If a domain has a **www redirect** configured in Forge (`from-www` or `to-www`), `www.<domain>` is automatically added to the Host() rule:
+
+```
+Host(`example.com`) || Host(`www.example.com`)
+```
+
+This applies in both redirect directions — Traefik must route `www.example.com` to the backend regardless of which way the redirect goes, since the redirect itself is handled by Nginx on the Forge server.
 
 ### Reverb WebSocket
 
