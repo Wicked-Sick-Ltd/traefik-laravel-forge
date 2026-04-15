@@ -473,28 +473,126 @@ func (p *Provider) processSite(
 		reverbPort = tags.ReverbPortOverride
 	}
 
-	mainHosts, wildcardHosts, reverbHosts := classifyDomains(domains, reverbHost)
+	mainDomains, reverbDomains := classifyDomains(domains, reverbHost)
 
-	if len(mainHosts) == 0 {
-		mainHosts = []string{site.Attributes.Name}
+	// Fallback: no Forge domain records → synthesize one from the site name.
+	if len(mainDomains) == 0 {
+		mainDomains = []ForgeDomain{{
+			Attributes: ForgeDomainAttributes{
+				Name:   site.Attributes.Name,
+				Status: "enabled",
+			},
+		}}
 	}
 
-	// Filter .on-forge.com domains and apply TLS rules.
-	mainHosts, enableTLS, certResolver := applyForgeDomainPolicy(
-		mainHosts, tags.IncludeForgeDomain, tags.EnableTLS, tags.CertResolver,
-		site.Attributes.Name,
-	)
-	if len(mainHosts) == 0 {
-		return // site skipped — only .on-forge.com domains and not opted in
-	}
-
-	// Append tag aliases not already present.
-	mainHosts = appendAliases(mainHosts, tags.Aliases)
-
-	routerName := fmt.Sprintf("forge-%s-%s", site.Attributes.Name, site.ID)
-	serviceName := fmt.Sprintf("%s-service", routerName)
+	serviceName := fmt.Sprintf("forge-%s-%s-service", site.Attributes.Name, site.ID)
 	siteBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port)
 
+	// One router per Forge domain record.
+	routersCreated := 0
+	for _, d := range mainDomains {
+		if p.createDomainRouter(site.ID, d, serviceName, tags, configuration, redirectMiddlewareName) {
+			routersCreated++
+		}
+	}
+
+	// traefik:aliases → one router per alias, skipping any already covered by a domain record.
+	for _, alias := range tags.Aliases {
+		routerName := fmt.Sprintf("forge-%s-%s", site.ID, alias)
+		if _, exists := configuration.HTTP.Routers[routerName]; !exists {
+			createRouter(routerName, fmt.Sprintf("Host(`%s`)", alias), serviceName, tags,
+				tags.EnableTLS, tags.CertResolver, configuration, redirectMiddlewareName)
+			routersCreated++
+		}
+	}
+
+	if routersCreated == 0 {
+		return
+	}
+
+	configuration.HTTP.Services[serviceName] = &dynamic.Service{
+		LoadBalancer: &dynamic.ServersLoadBalancer{
+			Servers:        []dynamic.Server{{URL: siteBackendURL}},
+			PassHostHeader: boolPtr(true),
+		},
+	}
+
+	log.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
+
+	if len(reverbDomains) > 0 && reverbPort > 0 {
+		reverbEntryPoints := tags.EntryPoints
+		if len(reverbEntryPoints) == 0 {
+			if tags.EnableTLS {
+				reverbEntryPoints = []string{"websecure"}
+			} else {
+				reverbEntryPoints = []string{"web"}
+			}
+		}
+		for _, rd := range reverbDomains {
+			reverbBase := fmt.Sprintf("forge-%s-%s", site.ID, rd.Attributes.Name)
+			p.addReverbRouter(reverbBase, []string{rd.Attributes.Name}, upstreamHost, reverbPort,
+				reverbEntryPoints, tags.EnableTLS, tags.CertResolver, tags.Middlewares, configuration)
+		}
+		log.Printf("Created Reverb router(s) for site %q port=%d", site.Attributes.Name, reverbPort)
+	}
+}
+
+// createDomainRouter creates a Traefik router for a single Forge domain record,
+// incorporating any www redirect and wildcard subdomain variants. Returns true if
+// a router was created (false if the domain was filtered out).
+func (p *Provider) createDomainRouter(
+	siteID string,
+	domain ForgeDomain,
+	serviceName string,
+	tags siteTagConfig,
+	configuration *dynamic.Configuration,
+	redirectMiddlewareName string,
+) bool {
+	name := domain.Attributes.Name
+
+	// .on-forge.com domains are skipped unless the site opted in.
+	if strings.HasSuffix(name, ".on-forge.com") {
+		if !tags.IncludeForgeDomain {
+			log.Printf("Skipping .on-forge.com domain %q (use traefik:forge-domain=true to include)", name)
+			return false
+		}
+		// Opted in but Forge controls TLS — disable cert management for this domain.
+		log.Printf("Domain %q is .on-forge.com — disabling TLS", name)
+		noTLSTags := tags
+		noTLSTags.EnableTLS = false
+		noTLSTags.CertResolver = ""
+		createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
+			fmt.Sprintf("Host(`%s`)", name), serviceName, noTLSTags,
+			false, "", configuration, redirectMiddlewareName)
+		return true
+	}
+
+	// Build the rule, adding www and wildcard variants that belong to this domain.
+	hosts := []string{name}
+	var wildcardHosts []string
+	if domain.Attributes.AllowWildcardSubdomains {
+		wildcardHosts = []string{name}
+	}
+	if domain.Attributes.WWWRedirectType != "" && domain.Attributes.WWWRedirectType != "none" &&
+		!strings.HasPrefix(name, "www.") {
+		hosts = append(hosts, "www."+name)
+	}
+
+	createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
+		buildHostRule(hosts, wildcardHosts), serviceName, tags,
+		tags.EnableTLS, tags.CertResolver, configuration, redirectMiddlewareName)
+	return true
+}
+
+// createRouter writes a router (and optional HTTP redirect router) into configuration.
+func createRouter(
+	routerName, rule, serviceName string,
+	tags siteTagConfig,
+	enableTLS bool,
+	certResolver string,
+	configuration *dynamic.Configuration,
+	redirectMiddlewareName string,
+) {
 	entryPoints := tags.EntryPoints
 	if len(entryPoints) == 0 {
 		if enableTLS {
@@ -504,12 +602,10 @@ func (p *Provider) processSite(
 		}
 	}
 
-	hostRule := buildHostRule(mainHosts, wildcardHosts)
-
 	router := &dynamic.Router{
 		EntryPoints: entryPoints,
 		Service:     serviceName,
-		Rule:        hostRule,
+		Rule:        rule,
 		Middlewares: tags.Middlewares,
 	}
 	if enableTLS {
@@ -524,28 +620,12 @@ func (p *Provider) processSite(
 		httpRouter := &dynamic.Router{
 			EntryPoints: []string{"web"},
 			Service:     serviceName,
-			Rule:        hostRule,
+			Rule:        rule,
 		}
 		if redirectMiddlewareName != "" {
 			httpRouter.Middlewares = []string{redirectMiddlewareName}
 		}
 		configuration.HTTP.Routers[routerName+"-http"] = httpRouter
-	}
-
-	configuration.HTTP.Services[serviceName] = &dynamic.Service{
-		LoadBalancer: &dynamic.ServersLoadBalancer{
-			Servers:        []dynamic.Server{{URL: siteBackendURL}},
-			PassHostHeader: boolPtr(true),
-		},
-	}
-
-	log.Printf("Created router for site %q hosts=%v -> %s", site.Attributes.Name, mainHosts, siteBackendURL)
-
-	if len(reverbHosts) > 0 && reverbPort > 0 {
-		p.addReverbRouter(routerName, reverbHosts, upstreamHost, reverbPort, entryPoints,
-			enableTLS, certResolver, tags.Middlewares, configuration)
-		log.Printf("Created Reverb router for site %q hosts=%v port=%d",
-			site.Attributes.Name, reverbHosts, reverbPort)
 	}
 }
 
@@ -590,85 +670,21 @@ func (p *Provider) addReverbRouter(
 	}
 }
 
-// classifyDomains partitions enabled domain records into main hosts, wildcard hosts,
-// and Reverb hosts. The reverbHost argument is the authoritative host from the
-// Reverb integration API; domain type alone is not sufficient.
-func classifyDomains(domains []ForgeDomain, reverbHost string) (main, wildcard, reverb []string) {
+// classifyDomains partitions enabled domain records into main domains and Reverb
+// domains. The reverbHost argument is authoritative — domain type alone is not
+// sufficient (see CLAUDE.md for details).
+func classifyDomains(domains []ForgeDomain, reverbHost string) (main, reverb []ForgeDomain) {
 	for _, d := range domains {
 		if d.Attributes.Status != "enabled" {
 			continue
 		}
-		name := d.Attributes.Name
-		if reverbHost != "" && name == reverbHost {
-			reverb = append(reverb, name)
-			continue
-		}
-		main = append(main, name)
-		if d.Attributes.AllowWildcardSubdomains {
-			wildcard = append(wildcard, name)
-		}
-		// If Forge manages a www redirect for this domain, Traefik must accept
-		// traffic on both apex and www — the redirect itself is handled by Nginx.
-		if d.Attributes.WWWRedirectType != "" && d.Attributes.WWWRedirectType != "none" &&
-			!strings.HasPrefix(name, "www.") {
-			main = append(main, "www."+name)
-		}
-	}
-	return main, wildcard, reverb
-}
-
-// applyForgeDomainPolicy filters .on-forge.com hosts according to the forge-domain
-// opt-in flag, adjusts TLS settings if only forge domains remain, and logs skipped sites.
-func applyForgeDomainPolicy(
-	hosts []string,
-	includeForgeDomain bool,
-	enableTLS bool,
-	certResolver string,
-	siteName string,
-) (filtered []string, outTLS bool, outResolver string) {
-	outTLS = enableTLS
-	outResolver = certResolver
-
-	hasReal := false
-	for _, h := range hosts {
-		if strings.HasSuffix(h, ".on-forge.com") {
-			if includeForgeDomain {
-				filtered = append(filtered, h)
-			}
+		if reverbHost != "" && d.Attributes.Name == reverbHost {
+			reverb = append(reverb, d)
 		} else {
-			filtered = append(filtered, h)
-			hasReal = true
+			main = append(main, d)
 		}
 	}
-
-	if len(filtered) == 0 {
-		log.Printf("Site %q has only .on-forge.com domains — skipping (use traefik:forge-domain=true to include)",
-			siteName)
-		return nil, false, ""
-	}
-
-	if !hasReal {
-		// Only forge domains opted in — disable TLS, Forge controls those certs.
-		log.Printf("Site %q uses only .on-forge.com domains — disabling TLS", siteName)
-		outTLS = false
-		outResolver = ""
-	}
-
-	return filtered, outTLS, outResolver
-}
-
-// appendAliases adds any tag aliases not already present in hosts.
-func appendAliases(hosts, aliases []string) []string {
-	existing := make(map[string]bool, len(hosts))
-	for _, h := range hosts {
-		existing[h] = true
-	}
-	for _, a := range aliases {
-		if !existing[a] {
-			hosts = append(hosts, a)
-		}
-	}
-	return hosts
+	return main, reverb
 }
 
 // siteDefaults holds the provider-level defaults applied before site tags are evaluated.

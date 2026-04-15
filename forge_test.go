@@ -444,16 +444,13 @@ func TestClassifyDomains(t *testing.T) {
 		{Attributes: ForgeDomainAttributes{Name: "disabled.com", Status: "disabled", DomainType: "primary"}},
 	}
 
-	main, wildcard, reverb := classifyDomains(domains, "ws.example.com")
+	main, reverb := classifyDomains(domains, "ws.example.com")
 
 	if len(main) != 2 {
-		t.Errorf("main hosts = %v, want 2", main)
+		t.Errorf("main len = %d, want 2", len(main))
 	}
-	if len(reverb) != 1 || reverb[0] != "ws.example.com" {
-		t.Errorf("reverb hosts = %v, want [ws.example.com]", reverb)
-	}
-	if len(wildcard) != 0 {
-		t.Errorf("wildcard hosts = %v, want empty", wildcard)
+	if len(reverb) != 1 || reverb[0].Attributes.Name != "ws.example.com" {
+		t.Errorf("reverb = %v, want [{ws.example.com}]", reverb)
 	}
 }
 
@@ -466,51 +463,45 @@ func TestClassifyDomainsWildcard(t *testing.T) {
 		}},
 	}
 
-	main, wildcard, reverb := classifyDomains(domains, "")
+	main, reverb := classifyDomains(domains, "")
 
-	if len(main) != 1 || main[0] != "example.com" {
+	if len(main) != 1 || main[0].Attributes.Name != "example.com" {
 		t.Errorf("main = %v, want [example.com]", main)
 	}
-	if len(wildcard) != 1 || wildcard[0] != "example.com" {
-		t.Errorf("wildcard = %v, want [example.com]", wildcard)
+	if !main[0].Attributes.AllowWildcardSubdomains {
+		t.Error("AllowWildcardSubdomains should be preserved on returned domain")
 	}
 	if len(reverb) != 0 {
 		t.Errorf("reverb = %v, want empty", reverb)
 	}
 }
 
-func TestClassifyDomainsWWWRedirect(t *testing.T) {
+func TestClassifyDomainsReverbNoMatch(t *testing.T) {
+	// When reverbHost is empty, all enabled domains go to main.
 	domains := []ForgeDomain{
-		{Attributes: ForgeDomainAttributes{
-			Name:            "example.com",
-			Status:          "enabled",
-			WWWRedirectType: "to-www",
-		}},
+		{Attributes: ForgeDomainAttributes{Name: "example.com", Status: "enabled"}},
+		{Attributes: ForgeDomainAttributes{Name: "alias.com", Status: "enabled"}},
 	}
 
-	main, _, _ := classifyDomains(domains, "")
+	main, reverb := classifyDomains(domains, "")
 
 	if len(main) != 2 {
-		t.Fatalf("main = %v, want [example.com, www.example.com]", main)
+		t.Errorf("main len = %d, want 2", len(main))
 	}
-	if main[1] != "www.example.com" {
-		t.Errorf("main[1] = %q, want www.example.com", main[1])
+	if len(reverb) != 0 {
+		t.Errorf("reverb = %v, want empty", reverb)
 	}
 }
 
-func TestClassifyDomainsWWWRedirectSkipsWWWPrefix(t *testing.T) {
-	// A domain already starting with "www." should not get another www. prepended.
+func TestClassifyDomainsSkipsDisabled(t *testing.T) {
 	domains := []ForgeDomain{
-		{Attributes: ForgeDomainAttributes{
-			Name:            "www.example.com",
-			Status:          "enabled",
-			WWWRedirectType: "from-www",
-		}},
+		{Attributes: ForgeDomainAttributes{Name: "active.com", Status: "enabled"}},
+		{Attributes: ForgeDomainAttributes{Name: "inactive.com", Status: "disabled"}},
 	}
 
-	main, _, _ := classifyDomains(domains, "")
+	main, _ := classifyDomains(domains, "")
 
-	if len(main) != 1 {
-		t.Errorf("main = %v, want only [www.example.com]", main)
+	if len(main) != 1 || main[0].Attributes.Name != "active.com" {
+		t.Errorf("main = %v, want only active.com", main)
 	}
 }
