@@ -54,7 +54,7 @@ All responses use the [JSON:API](https://jsonapi.org) envelope format with `data
 - Traefik dashboard config
 - Shared middleware definitions (the plugin references them by name via `traefik:middlewares=` tag)
 
-The owner's live static config lives in `etc-traefik/` in this repo for reference.
+The owner's live static config is not stored in this repo.
 
 ## Verify tool (`cmd/verify`)
 
@@ -115,7 +115,6 @@ Do not add new top-level markdown files for features or investigations — that'
 forge.go              # plugin implementation
 forge_test.go         # unit tests (tag parsing, config validation)
 cmd/verify/main.go    # CLI tool for previewing plugin output against real Forge API
-etc-traefik/          # owner's live Traefik static config (reference only, not deployed from here)
 traefik.example.yml   # example static config for new users
 README.md             # main docs
 TAG_CONFIGURATION.md  # complete tag reference
