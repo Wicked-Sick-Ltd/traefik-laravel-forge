@@ -931,17 +931,8 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 				}
 				configuration.HTTP.Routers[fmt.Sprintf("%s-reverb", routerName)] = reverbRouter
 
-				if httpRedirect && enableTLS {
-					reverbHTTPRouter := &dynamic.Router{
-						EntryPoints: []string{"web"},
-						Service:     reverbServiceName,
-						Rule:         reverbRule,
-					}
-					if redirectMiddlewareName != "" {
-						reverbHTTPRouter.Middlewares = []string{redirectMiddlewareName}
-					}
-					configuration.HTTP.Routers[fmt.Sprintf("%s-reverb-http", routerName)] = reverbHTTPRouter
-				}
+				// No HTTP redirect router for Reverb — WebSocket clients don't follow
+				// HTTP redirects during the upgrade handshake, so it would never be used.
 
 				configuration.HTTP.Services[reverbServiceName] = &dynamic.Service{
 					LoadBalancer: &dynamic.ServersLoadBalancer{
