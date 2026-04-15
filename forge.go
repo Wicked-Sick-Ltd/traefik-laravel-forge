@@ -6,12 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/traefik/genconf/dynamic"
 	"github.com/traefik/genconf/dynamic/tls"
 )
+
+// pluginLog writes to stdout so Traefik captures the output below ERROR level.
+// Go's default logger writes to stderr, which Traefik surfaces as level=error —
+// incorrect for informational polling messages.
+var pluginLog = log.New(os.Stdout, "", 0) //nolint:gochecknoglobals
 
 // ServerMapping maps a Forge server to an upstream backend.
 type ServerMapping struct {
@@ -211,7 +217,7 @@ func (p *Provider) Provide(cfgChan chan<- json.Marshaler) error {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Print(r)
+				fmt.Fprintf(os.Stderr, "forge plugin panic: %v\n", r)
 			}
 		}()
 		p.loadConfiguration(ctx, cfgChan)
@@ -247,7 +253,7 @@ func (p *Provider) loadConfiguration(ctx context.Context, cfgChan chan<- json.Ma
 func (p *Provider) sendConfiguration(cfgChan chan<- json.Marshaler) {
 	configuration, err := p.generateConfiguration()
 	if err != nil {
-		log.Printf("Error generating configuration: %v", err)
+		fmt.Fprintf(os.Stderr, "forge: error generating configuration: %v\n", err)
 		return
 	}
 	cfgChan <- &dynamic.JSONPayload{Configuration: configuration}
@@ -308,7 +314,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 		return nil, fmt.Errorf("failed to fetch servers: %w", err)
 	}
 
-	log.Printf("Fetched %d servers from Forge", len(servers))
+	pluginLog.Printf("Fetched %d servers from Forge", len(servers))
 
 	for _, server := range servers {
 		p.processServer(server, configuration, redirectMiddlewareName)
@@ -326,7 +332,7 @@ func (p *Provider) processServer(
 
 	// In multi-LB mode, skip servers not assigned to this instance.
 	if p.traefikID != "" && tagConfig.TraefikID != p.traefikID {
-		log.Printf("Server %q skipped (traefik-id=%q, want %q)",
+		pluginLog.Printf("Server %q skipped (traefik-id=%q, want %q)",
 			server.Attributes.Name, tagConfig.TraefikID, p.traefikID)
 		return
 	}
@@ -344,30 +350,30 @@ func (p *Provider) processServer(
 	upstreamHost, upstreamPort := p.resolveUpstream(server, tagConfig, mapping)
 	if upstreamHost == "" {
 		// Checked again after site filtering; log deferred to resolveUpstream.
-		log.Printf("Server %q has no upstream host — will skip if any sites need routing",
+		pluginLog.Printf("Server %q has no upstream host — will skip if any sites need routing",
 			server.Attributes.Name)
 	}
 
 	sites, err := p.client.FetchSites(server.ID)
 	if err != nil {
-		log.Printf("Failed to fetch sites for server %q: %v", server.Attributes.Name, err)
+		fmt.Fprintf(os.Stderr, "forge: failed to fetch sites for server %q: %v\n", server.Attributes.Name, err)
 		return
 	}
 
-	log.Printf("Found %d sites on server %q", len(sites), server.Attributes.Name)
+	pluginLog.Printf("Found %d sites on server %q", len(sites), server.Attributes.Name)
 
 	// Skip the server entirely if none of its sites are enabled.
 	if !hasEnabledSites(sites, p.defaultSitesEnabled) {
-		log.Printf("Server %q has no enabled sites, skipping", server.Attributes.Name)
+		pluginLog.Printf("Server %q has no enabled sites, skipping", server.Attributes.Name)
 		return
 	}
 
 	if upstreamHost == "" {
-		log.Printf("Server %q has enabled sites but no IP address — skipping", server.Attributes.Name)
+		pluginLog.Printf("Server %q has enabled sites but no IP address — skipping", server.Attributes.Name)
 		return
 	}
 
-	log.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
+	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
 
 	for _, site := range sites {
 		p.processSite(site, server.ID, upstreamHost, upstreamPort, configuration, redirectMiddlewareName)
@@ -436,7 +442,7 @@ func (p *Provider) processSite(
 	redirectMiddlewareName string,
 ) {
 	if site.Attributes.Status != "installed" {
-		log.Printf("Site %q status=%q, skipping", site.Attributes.Name, site.Attributes.Status)
+		pluginLog.Printf("Site %q status=%q, skipping", site.Attributes.Name, site.Attributes.Status)
 		return
 	}
 
@@ -449,19 +455,20 @@ func (p *Provider) processSite(
 	tags := parseSiteTags(site.Attributes.Tags, defaults)
 
 	if !tags.Enabled {
-		log.Printf("Site %q disabled, skipping", site.Attributes.Name)
+		pluginLog.Printf("Site %q disabled, skipping", site.Attributes.Name)
 		return
 	}
 
 	domains, err := p.client.FetchDomains(serverID, site.ID)
 	if err != nil {
-		log.Printf("Failed to fetch domains for site %q: %v — falling back to site name",
+		fmt.Fprintf(os.Stderr, "forge: failed to fetch domains for site %q: %v — falling back to site name\n",
 			site.Attributes.Name, err)
 	}
 
 	reverb, err := p.client.FetchReverbIntegration(serverID, site.ID)
 	if err != nil {
-		log.Printf("Failed to fetch Reverb integration for site %q: %v", site.Attributes.Name, err)
+		fmt.Fprintf(os.Stderr, "forge: failed to fetch Reverb integration for site %q: %v\n",
+			site.Attributes.Name, err)
 	}
 
 	reverbHost, reverbPort := "", 0
@@ -517,7 +524,7 @@ func (p *Provider) processSite(
 		},
 	}
 
-	log.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
+	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
 
 	if len(reverbDomains) > 0 && reverbPort > 0 {
 		reverbEntryPoints := tags.EntryPoints
@@ -533,7 +540,7 @@ func (p *Provider) processSite(
 			p.addReverbRouter(reverbBase, []string{rd.Attributes.Name}, upstreamHost, reverbPort,
 				reverbEntryPoints, tags.EnableTLS, tags.CertResolver, tags.Middlewares, configuration)
 		}
-		log.Printf("Created Reverb router(s) for site %q port=%d", site.Attributes.Name, reverbPort)
+		pluginLog.Printf("Created Reverb router(s) for site %q port=%d", site.Attributes.Name, reverbPort)
 	}
 }
 
@@ -553,11 +560,11 @@ func (p *Provider) createDomainRouter(
 	// .on-forge.com domains are skipped unless the site opted in.
 	if strings.HasSuffix(name, ".on-forge.com") {
 		if !tags.IncludeForgeDomain {
-			log.Printf("Skipping .on-forge.com domain %q (use traefik:forge-domain=true to include)", name)
+			pluginLog.Printf("Skipping .on-forge.com domain %q (use traefik:forge-domain=true to include)", name)
 			return false
 		}
 		// Opted in but Forge controls TLS — disable cert management for this domain.
-		log.Printf("Domain %q is .on-forge.com — disabling TLS", name)
+		pluginLog.Printf("Domain %q is .on-forge.com — disabling TLS", name)
 		noTLSTags := tags
 		noTLSTags.EnableTLS = false
 		noTLSTags.CertResolver = ""
