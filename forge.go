@@ -141,6 +141,28 @@ type Provider struct {
 	cancel func()
 }
 
+// NewProviderWithClient creates a Provider from the given config but uses client
+// for all Forge API calls instead of the default HTTP client. Unlike New, it
+// does not require APIToken or Organization since the supplied client handles
+// all API communication. Intended for integration tests and tooling.
+func NewProviderWithClient(config *Config, client ForgeClient) (*Provider, error) {
+	pi, err := time.ParseDuration(config.PollInterval)
+	if err != nil {
+		return nil, err
+	}
+	return &Provider{
+		name:                "custom",
+		pollInterval:        pi,
+		defaultCertResolver: config.DefaultCertResolver,
+		defaultSitesEnabled: config.DefaultSitesEnabled,
+		httpRedirect:        config.HTTPRedirect,
+		redirectMiddleware:  config.RedirectMiddleware,
+		traefikID:           config.TraefikID,
+		serverMappings:      config.ServerMappings,
+		client:              client,
+	}, nil
+}
+
 // New creates a new Provider plugin.
 func New(_ context.Context, config *Config, name string) (*Provider, error) {
 	if config.APIToken == "" {
