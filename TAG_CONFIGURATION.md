@@ -62,7 +62,7 @@ traefik:port=8080
 traefik:port=3000
 ```
 
-Does not affect the Reverb router port — use `traefik:reverb-port` for that.
+Does not affect the Reverb router — Reverb traffic routes through Nginx on port 80.
 
 ---
 
@@ -137,18 +137,6 @@ Without this tag, the site is skipped entirely. With it, the site is routed on H
 
 **Site with real custom domains alongside `.on-forge.com`:**
 Without this tag, the `.on-forge.com` domain is silently dropped from the Host() rule and the real domains are routed normally. With the tag, the `.on-forge.com` domain is included in the rule alongside the real ones.
-
----
-
-### `traefik:reverb-port`
-
-Override the Reverb WebSocket port. The plugin auto-detects the port from Forge's Reverb integration config — use this tag only if the detected port is wrong.
-
-```
-traefik:reverb-port=8081
-```
-
-Has no effect if the site has no Reverb domain configured.
 
 ---
 
@@ -229,7 +217,9 @@ Traefik must route both the apex and `www.` variant to the backend regardless of
 
 ### Reverb WebSocket
 
-If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain pointing to the configured port. Override the port with `traefik:reverb-port=` if needed.
+If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain. The router points to **Nginx on port 80** — the same backend as the main site. Nginx handles the WebSocket proxy to the Reverb process internally using the location block Forge creates.
+
+The Reverb router has no HTTP→HTTPS redirect (WebSocket clients don't follow redirects). All other settings (TLS, middlewares, entry points) match the main site.
 
 ---
 

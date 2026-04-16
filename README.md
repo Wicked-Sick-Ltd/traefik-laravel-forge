@@ -45,7 +45,7 @@ On each poll the plugin:
 Each site produces:
 - A **main router** covering all its primary and alias domains (with `HostRegexp` for wildcard-enabled domains)
 - An **HTTP redirect router** (if `httpRedirect` is enabled)
-- A **Reverb router** on the Reverb port (if Reverb is configured in Forge)
+- A **Reverb router** for the Reverb domain (if Reverb is configured in Forge), routing through Nginx
 
 No `serverMappings` config is required — the plugin discovers everything from Forge automatically.
 
@@ -178,7 +178,6 @@ Add these to any site in Forge to control how it's routed:
 | `traefik:aliases` | `traefik:aliases=app.example.com,www.example.com` | Add extra hostnames to the router rule (comma-separated) |
 | `traefik:middlewares` | `traefik:middlewares=my-auth,rate-limit` | Attach named Traefik middlewares to this site's router (comma-separated). Middlewares must be defined in static config. Applied to the main and Reverb routers; not the HTTP redirect router |
 | `traefik:forge-domain` | `traefik:forge-domain=true` | Opt `.on-forge.com` domains into routing. Without this, `.on-forge.com`-only sites are skipped entirely; mixed-domain sites have the `.on-forge.com` entry dropped. When opted in, TLS is disabled for `.on-forge.com` domains |
-| `traefik:reverb-port` | `traefik:reverb-port=8081` | Override the auto-detected Reverb WebSocket port |
 
 ### Server tags
 
@@ -236,11 +235,12 @@ This applies in both redirect directions — Traefik must route `www.example.com
 
 If a site has Reverb configured in Forge, the plugin automatically:
 
-1. Fetches the Reverb host and port from `/integrations/reverb`
-2. Creates a **separate router** for the Reverb domain pointing to that port
-3. Applies the same TLS and HTTP redirect settings as the main router
+1. Fetches the Reverb host from `/integrations/reverb`
+2. Creates a **separate router** for the Reverb domain, pointing to Nginx on port 80
+3. Applies the same TLS settings as the main router
+4. **No HTTP→HTTPS redirect** for the Reverb router — WebSocket clients don't follow redirects
 
-Use `traefik:reverb-port=NNNN` to override the detected port if needed.
+Nginx handles the WebSocket proxy to the Reverb process internally, using the location block Forge creates when you enable Reverb. Traefik only needs to route the Reverb domain to Nginx.
 
 ## What to keep in static config
 
@@ -312,9 +312,9 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
 - Requires Traefik v3 — `HostRegexp` syntax changed between v2 and v3
 - Check that `allow_wildcard_subdomains` is enabled on the domain in Forge
 
-**Reverb router on wrong port**
-- Use `traefik:reverb-port=NNNN` tag on the site to override
-- Or verify the port in Forge under the site's Reverb integration settings
+**Reverb WebSocket not working**
+- Confirm Reverb is enabled in Forge under the site's Integrations tab
+- The Reverb domain routes to Nginx (port 80), which proxies to Reverb internally — check Nginx logs on the server if connections are failing
 
 **Poll interval error**
 - Minimum is `10s`. Recommended `30s`–`60s` in production.

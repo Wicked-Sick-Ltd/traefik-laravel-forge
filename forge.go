@@ -471,13 +471,12 @@ func (p *Provider) processSite(
 			site.Attributes.Name, err)
 	}
 
-	reverbHost, reverbPort := "", 0
+	// We only need the Reverb host to identify which domain record belongs to
+	// Reverb — traffic is routed to Nginx (same backend as the main site), which
+	// handles the WebSocket proxy internally. We never talk to Reverb directly.
+	reverbHost := ""
 	if reverb != nil {
 		reverbHost = reverb.Host
-		reverbPort = reverb.Port
-	}
-	if tags.ReverbPortOverride > 0 {
-		reverbPort = tags.ReverbPortOverride
 	}
 
 	mainDomains, reverbDomains := classifyDomains(domains, reverbHost)
@@ -526,21 +525,18 @@ func (p *Provider) processSite(
 
 	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
 
-	if len(reverbDomains) > 0 && reverbPort > 0 {
-		reverbEntryPoints := tags.EntryPoints
-		if len(reverbEntryPoints) == 0 {
-			if tags.EnableTLS {
-				reverbEntryPoints = []string{"websecure"}
-			} else {
-				reverbEntryPoints = []string{"web"}
+	// Reverb domains route through the same Nginx backend as the main site.
+	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
+	// HTTP redirect is suppressed — WebSocket clients don't follow redirects.
+	if len(reverbDomains) > 0 {
+		noRedirectTags := tags
+		noRedirectTags.HTTPRedirect = false
+		for _, rd := range reverbDomains {
+			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
+				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
 			}
 		}
-		for _, rd := range reverbDomains {
-			reverbBase := fmt.Sprintf("forge-%s-%s", site.ID, rd.Attributes.Name)
-			p.addReverbRouter(reverbBase, []string{rd.Attributes.Name}, upstreamHost, reverbPort,
-				reverbEntryPoints, tags.EnableTLS, tags.CertResolver, tags.Middlewares, configuration)
-		}
-		pluginLog.Printf("Created Reverb router(s) for site %q port=%d", site.Attributes.Name, reverbPort)
 	}
 }
 
@@ -636,46 +632,6 @@ func createRouter(
 	}
 }
 
-func (p *Provider) addReverbRouter(
-	baseRouterName string,
-	reverbHosts []string,
-	upstreamHost string,
-	reverbPort int,
-	entryPoints []string,
-	enableTLS bool,
-	certResolver string,
-	middlewares []string,
-	configuration *dynamic.Configuration,
-) {
-	reverbRouterName := baseRouterName + "-reverb"
-	reverbServiceName := reverbRouterName + "-service"
-	reverbBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, reverbPort)
-	reverbRule := buildHostRule(reverbHosts, nil)
-
-	reverbRouter := &dynamic.Router{
-		EntryPoints: entryPoints,
-		Service:     reverbServiceName,
-		Rule:        reverbRule,
-		Middlewares: middlewares,
-	}
-	if enableTLS {
-		reverbRouter.TLS = &dynamic.RouterTLSConfig{}
-		if certResolver != "" {
-			reverbRouter.TLS.CertResolver = certResolver
-		}
-	}
-	configuration.HTTP.Routers[reverbRouterName] = reverbRouter
-
-	// No HTTP redirect router for Reverb — WebSocket clients don't follow
-	// HTTP redirects during the upgrade handshake, so it would never be used.
-
-	configuration.HTTP.Services[reverbServiceName] = &dynamic.Service{
-		LoadBalancer: &dynamic.ServersLoadBalancer{
-			Servers:        []dynamic.Server{{URL: reverbBackendURL}},
-			PassHostHeader: boolPtr(true),
-		},
-	}
-}
 
 // classifyDomains partitions enabled domain records into main domains and Reverb
 // domains. The reverbHost argument is authoritative — domain type alone is not
@@ -712,7 +668,6 @@ type siteTagConfig struct {
 	EntryPoints        []string
 	Aliases            []string
 	Middlewares        []string
-	ReverbPortOverride int
 	IncludeForgeDomain bool
 }
 
@@ -757,11 +712,6 @@ func parseSiteTags(tags []string, defaults siteDefaults) siteTagConfig {
 				if a = strings.TrimSpace(a); a != "" {
 					cfg.Aliases = append(cfg.Aliases, a)
 				}
-			}
-		case "reverb-port":
-			var port int
-			if n, _ := fmt.Sscanf(value, "%d", &port); n == 1 {
-				cfg.ReverbPortOverride = port
 			}
 		case "forge-domain":
 			cfg.IncludeForgeDomain = value == "true"

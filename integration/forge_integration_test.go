@@ -364,19 +364,23 @@ func TestGenerateConfiguration_ReverbRouter(t *testing.T) {
 	cfg, err := p.GenerateConfiguration()
 	require.NoError(t, err)
 
-	// Main + HTTP redirect + Reverb = 3; no HTTP redirect for Reverb.
+	// Main + HTTP redirect (main only) + Reverb = 3.
+	// Reverb gets no HTTP redirect — WebSocket clients don't follow redirects.
 	assert.Len(t, cfg.HTTP.Routers, 3)
 
-	reverbRouter := cfg.HTTP.Routers["forge-site1-ws.example.com-reverb"]
+	// Reverb router exists with correct rule and TLS.
+	reverbRouter := cfg.HTTP.Routers["forge-site1-ws.example.com"]
 	require.NotNil(t, reverbRouter)
 	assert.Equal(t, "Host(`ws.example.com`)", reverbRouter.Rule)
 	require.NotNil(t, reverbRouter.TLS)
 
-	reverbSvc := cfg.HTTP.Services["forge-site1-ws.example.com-reverb-service"]
-	require.NotNil(t, reverbSvc)
-	assert.Equal(t, "http://10.0.0.1:8081", reverbSvc.LoadBalancer.Servers[0].URL)
+	// Reverb router uses the same service as the main site — traffic goes to
+	// Nginx (port 80) which handles the WebSocket proxy internally.
+	assert.Equal(t, "forge-example.com-site1-service", reverbRouter.Service)
 
-	assert.Nil(t, cfg.HTTP.Routers["forge-site1-ws.example.com-reverb-http"])
+	// No separate Reverb service and no HTTP redirect for Reverb.
+	assert.Nil(t, cfg.HTTP.Services["forge-site1-ws.example.com-reverb-service"])
+	assert.Nil(t, cfg.HTTP.Routers["forge-site1-ws.example.com-http"])
 }
 
 func TestGenerateConfiguration_ForgeDomainSkipped(t *testing.T) {
@@ -590,30 +594,6 @@ func TestGenerateConfiguration_MultiSiteMultiServer(t *testing.T) {
 	svc3 := cfg.HTTP.Services["forge-site-c.com-site3-service"]
 	require.NotNil(t, svc3)
 	assert.Equal(t, "http://10.0.0.2:80", svc3.LoadBalancer.Servers[0].URL)
-}
-
-func TestGenerateConfiguration_ReverbPortTagOverride(t *testing.T) {
-	m := mocks.NewMockForgeClient(t)
-	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
-	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{
-		makeSite("site1", "example.com", "traefik:reverb-port=9000"),
-	}, nil)
-	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
-		makeDomain("example.com", "primary"),
-		makeDomain("ws.example.com", "alias"),
-	}, nil)
-	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(&forge.ForgeReverbIntegration{
-		Enabled: true,
-		Host:    "ws.example.com",
-		Port:    8081,
-	}, nil)
-
-	cfg, err := newProvider(t, m).GenerateConfiguration()
-	require.NoError(t, err)
-
-	reverbSvc := cfg.HTTP.Services["forge-site1-ws.example.com-reverb-service"]
-	require.NotNil(t, reverbSvc)
-	assert.Equal(t, "http://10.0.0.1:9000", reverbSvc.LoadBalancer.Servers[0].URL)
 }
 
 func TestGenerateConfiguration_NoHTTPRedirectWithoutTLS(t *testing.T) {

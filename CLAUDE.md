@@ -26,12 +26,14 @@ Trying `/aliases` in the URL actually also works (it redirects internally) but t
 
 The `type` field on a domain record is unreliable for inferring routing intent. For example, `ws.bounceiq.net` is type `alias` but is actually the Reverb WebSocket endpoint (port 8081). Don't use domain type alone to decide routing behaviour — use the Reverb integration endpoint instead.
 
-### Reverb is the source of truth for WebSocket ports
+### Reverb integration endpoint identifies the Reverb domain
 
 ```
 GET /api/orgs/{org}/servers/{server}/sites/{site}/integrations/reverb
 ```
-Returns `enabled`, `host`, and `port`. This is authoritative. If `enabled: false` or `port: null`, the site has no Reverb. Don't use domain record type `reverb` as the sole signal — use this endpoint. The `ws.bounceiq.net` domain is type `alias` (not `reverb`) but still has a Reverb integration at port 8081.
+Returns `enabled`, `host`, and `port`. We use this to identify which domain is the Reverb domain (the `host` field). If `enabled: false` or `host` is empty, the site has no Reverb. Don't use domain record type `reverb` as the sole signal — use this endpoint. The `ws.bounceiq.net` domain is type `alias` (not `reverb`) but still has a Reverb integration.
+
+**We do not use the `port` field for routing.** Reverb domain traffic routes to Nginx (port 80), which proxies to Reverb internally via its Forge-configured location block. This is the correct architecture — bypassing Nginx was a mistake.
 
 ### Wildcard subdomains require Traefik v3
 

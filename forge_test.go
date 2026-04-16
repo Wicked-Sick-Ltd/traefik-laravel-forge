@@ -419,13 +419,6 @@ func TestParseSiteTags(t *testing.T) {
 		}
 	})
 
-	t.Run("reverb-port override", func(t *testing.T) {
-		got := parseSiteTags([]string{"traefik:reverb-port=8081"}, defaults)
-		if got.ReverbPortOverride != 8081 {
-			t.Errorf("ReverbPortOverride = %d, want 8081", got.ReverbPortOverride)
-		}
-	})
-
 	t.Run("forge-domain opt-in", func(t *testing.T) {
 		got := parseSiteTags([]string{"traefik:forge-domain=true"}, defaults)
 		if !got.IncludeForgeDomain {
