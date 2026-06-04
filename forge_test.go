@@ -498,3 +498,25 @@ func TestClassifyDomainsSkipsDisabled(t *testing.T) {
 		t.Errorf("main = %v, want only active.com", main)
 	}
 }
+
+// -- domainPriority unit tests --
+
+func TestDomainPriority(t *testing.T) {
+	tests := []struct {
+		domain string
+		want   int
+	}{
+		{"bounceiq.com", 200},
+		{"staging.bounceiq.com", 300},
+		{"ws.bounceiq.com", 300},
+		{"ws.staging.bounceiq.com", 400},
+		{"app.us.staging.bounceiq.com", 500},
+	}
+	for _, tt := range tests {
+		t.Run(tt.domain, func(t *testing.T) {
+			if got := domainPriority(tt.domain); got != tt.want {
+				t.Errorf("domainPriority(%q) = %d, want %d", tt.domain, got, tt.want)
+			}
+		})
+	}
+}

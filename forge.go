@@ -507,7 +507,7 @@ func (p *Provider) processSite(
 		routerName := fmt.Sprintf("forge-%s-%s", site.ID, alias)
 		if _, exists := configuration.HTTP.Routers[routerName]; !exists {
 			createRouter(routerName, fmt.Sprintf("Host(`%s`)", alias), serviceName, tags,
-				tags.EnableTLS, tags.CertResolver, configuration, redirectMiddlewareName)
+				tags.EnableTLS, tags.CertResolver, domainPriority(alias), configuration, redirectMiddlewareName)
 			routersCreated++
 		}
 	}
@@ -566,7 +566,7 @@ func (p *Provider) createDomainRouter(
 		noTLSTags.CertResolver = ""
 		createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
 			fmt.Sprintf("Host(`%s`)", name), serviceName, noTLSTags,
-			false, "", configuration, redirectMiddlewareName)
+			false, "", domainPriority(name), configuration, redirectMiddlewareName)
 		return true
 	}
 
@@ -583,7 +583,7 @@ func (p *Provider) createDomainRouter(
 
 	createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
 		buildHostRule(hosts, wildcardHosts), serviceName, tags,
-		tags.EnableTLS, tags.CertResolver, configuration, redirectMiddlewareName)
+		tags.EnableTLS, tags.CertResolver, domainPriority(name), configuration, redirectMiddlewareName)
 	return true
 }
 
@@ -593,6 +593,7 @@ func createRouter(
 	tags siteTagConfig,
 	enableTLS bool,
 	certResolver string,
+	priority int,
 	configuration *dynamic.Configuration,
 	redirectMiddlewareName string,
 ) {
@@ -610,6 +611,7 @@ func createRouter(
 		Service:     serviceName,
 		Rule:        rule,
 		Middlewares: tags.Middlewares,
+		Priority:    priority,
 	}
 	if enableTLS {
 		router.TLS = &dynamic.RouterTLSConfig{}
@@ -624,6 +626,7 @@ func createRouter(
 			EntryPoints: []string{"web"},
 			Service:     serviceName,
 			Rule:        rule,
+			Priority:    priority,
 		}
 		if redirectMiddlewareName != "" {
 			httpRouter.Middlewares = []string{redirectMiddlewareName}
@@ -790,6 +793,13 @@ func buildHostRule(hosts, wildcardHosts []string) string {
 		parts = append(parts, fmt.Sprintf("HostRegexp(`^[^.]+\\.%s$`)", escaped))
 	}
 	return strings.Join(parts, " || ")
+}
+
+// domainPriority returns the routing priority for a domain-based router. More
+// specific (deeper) domains get higher priority so subdomain-specific rules
+// always outrank parent wildcard rules regardless of rule string length.
+func domainPriority(domain string) int {
+	return (strings.Count(domain, ".") + 1) * 100
 }
 
 func boolPtr(v bool) *bool { return &v }
