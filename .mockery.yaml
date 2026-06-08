@@ -1,0 +1,12 @@
+with-expecter: true
+resolve-type-alias: false
+disable-version-string: true
+issue-845-fix: true
+packages:
+  github.com/Wicked-Sick-Ltd/traefik-laravel-forge:
+    interfaces:
+      ForgeClient:
+        config:
+          dir: "mocks"
+          outpkg: "mocks"
+          filename: "mock_forge_client.go"

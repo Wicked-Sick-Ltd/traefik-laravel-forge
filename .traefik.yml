@@ -1,10 +1,14 @@
-displayName: Provider Plugin Demo
+displayName: Laravel Forge Provider
 type: provider
-iconPath: .assets/icon.png
 
-import: github.com/traefik/pluginproviderdemo
+import: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
 
-summary: '[Demo] Simple Provider Plugin'
+summary: 'Automatically create Traefik routers from Laravel Forge sites. Configure via tags or config file with auto-IP detection and TLS support.'
 
 testData:
-  pollInterval: 5s
+  apiToken: "test-api-token-12345"
+  organization: "test-org"
+  pollInterval: "30s"
+  defaultCertResolver: "letsencrypt"
+  defaultSitesEnabled: true
+  serverMappings: []

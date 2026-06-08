@@ -11,6 +11,7 @@ test:
 	go test -v -cover ./...
 
 yaegi_test:
+	cp -r ./vendor/. $(shell go env GOPATH)/src/
 	yaegi test .
 
 vendor:

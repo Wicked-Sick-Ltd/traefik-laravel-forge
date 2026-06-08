@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0D1B2A"/>
+      <stop offset="100%" stop-color="#1A2D42"/>
+    </linearGradient>
+
+    <!-- Forge hex: warm orange → deep red -->
+    <linearGradient id="forgeGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#CC1717"/>
+    </linearGradient>
+
+    <!-- Traefik hex: teal → ocean blue -->
+    <linearGradient id="traefikGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2DD4BF"/>
+      <stop offset="100%" stop-color="#0369A1"/>
+    </linearGradient>
+
+    <!-- Subtle inner shadow for hexagons -->
+    <filter id="hexShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+
+    <!-- Glow for the connector -->
+    <filter id="connectorGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- ── Background ── -->
+  <rect width="400" height="400" rx="52" fill="url(#bgGrad)"/>
+
+  <!-- Subtle dot-grid pattern -->
+  <g fill="#3B5268" opacity="0.25">
+    <circle cx="100" cy="100" r="2"/><circle cx="200" cy="100" r="2"/><circle cx="300" cy="100" r="2"/>
+    <circle cx=" 50" cy="150" r="2"/><circle cx="150" cy="150" r="2"/><circle cx="250" cy="150" r="2"/><circle cx="350" cy="150" r="2"/>
+    <circle cx="100" cy="200" r="2"/><circle cx="200" cy="200" r="2"/><circle cx="300" cy="200" r="2"/>
+    <circle cx=" 50" cy="250" r="2"/><circle cx="150" cy="250" r="2"/><circle cx="250" cy="250" r="2"/><circle cx="350" cy="250" r="2"/>
+    <circle cx="100" cy="300" r="2"/><circle cx="200" cy="300" r="2"/><circle cx="300" cy="300" r="2"/>
+  </g>
+
+  <!-- ── Left hexagon: Forge ──
+       Flat-top hex, cx=125, cy=195, r=88
+       Points (angle 0°=right, going clockwise from top-right):
+         top-right:  (125+88·cos30,  195−88·sin30) = (201.2, 151)
+         right:      (125+88,        195)           = (213,   195)
+         bot-right:  (201.2,         239)
+         bot-left:   (48.8,          239)
+         left:       (37,            195)
+         top-left:   (48.8,          151)
+  -->
+  <polygon
+    points="201,151 213,195 201,239 49,239 37,195 49,151"
+    fill="url(#forgeGrad)"
+    filter="url(#hexShadow)"
+  />
+
+  <!-- Forge "F" letterform — vertically centred in the hexagon -->
+  <text x="124" y="193"
+        font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="900" font-size="96"
+        fill="#FFFFFF" fill-opacity="0.95"
+        text-anchor="middle"
+        dominant-baseline="central">F</text>
+
+  <!-- ── Connector: pipe + arrow ── -->
+  <!-- Pipe -->
+  <line x1="216" y1="195" x2="244" y2="195"
+        stroke="#7DD3FC" stroke-width="5" stroke-linecap="round"
+        filter="url(#connectorGlow)" opacity="0.9"/>
+  <!-- Arrowhead -->
+  <polygon points="240,188 252,195 240,202"
+           fill="#7DD3FC" opacity="0.9"
+           filter="url(#connectorGlow)"/>
+
+  <!-- ── Right hexagon: Traefik ──
+       cx=275, cy=195, r=88
+         top-right:  (275+76.2, 195−44) = (351.2, 151)
+         right:      (363,      195)
+         bot-right:  (351.2,    239)
+         bot-left:   (198.8,    239)
+         left:       (187,      195)
+         top-left:   (198.8,    151)
+  -->
+  <polygon
+    points="351,151 363,195 351,239 199,239 187,195 199,151"
+    fill="url(#traefikGrad)"
+    filter="url(#hexShadow)"
+  />
+
+  <!-- Routing arrow inside the Traefik hex -->
+  <!-- Horizontal shaft -->
+  <line x1="220" y1="195" x2="308" y2="195"
+        stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"
+        opacity="0.95"/>
+  <!-- Arrowhead -->
+  <polygon points="300,177 334,195 300,213"
+           fill="#FFFFFF" opacity="0.95"/>
+
+  <!-- Small decorative "fork" lines above/below to suggest multi-route -->
+  <line x1="220" y1="175" x2="268" y2="175"
+        stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.45"/>
+  <line x1="220" y1="215" x2="268" y2="215"
+        stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.45"/>
+
+  <!-- ── Label ── -->
+  <text x="200" y="358"
+        font-family="'Arial', 'Helvetica Neue', sans-serif"
+        font-weight="700" font-size="18"
+        fill="#64748B"
+        text-anchor="middle"
+        letter-spacing="5">TRAEFIK · FORGE</text>
+</svg>

@@ -1,0 +1,88 @@
+# Example Traefik v3 static configuration for traefik-laravel-forge
+# Copy to traefik.yml and adjust for your environment.
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+# --- Certificate resolver ---
+# Shown here with Cloudflare DNS challenge. Adjust for your provider.
+# The resolver name ("cloudflare") must match defaultCertResolver in the plugin config.
+certificatesResolvers:
+  cloudflare:
+    acme:
+      email: you@example.com
+      storage: /etc/traefik/acme/acme.json
+      dnsChallenge:
+        provider: cloudflare
+        propagation:
+          delayBeforeChecks: 10
+
+# Uncomment to enable the Traefik dashboard on a separate port
+# api:
+#   dashboard: true
+# entryPoints:
+#   dashboard:
+#     address: ":8081"
+
+log:
+  level: INFO  # Use DEBUG to see plugin discovery decisions
+
+# --- File provider ---
+# Keep this for static configs that the plugin doesn't manage:
+# vanity domain redirects, dashboard config, shared middleware definitions.
+providers:
+  file:
+    directory: /etc/traefik/conf.d
+    watch: true
+
+  # --- Plugin config ---
+  plugin:
+    forge:
+      # Sensitive values — read from environment variables.
+      # Traefik expands $VAR / ${VAR} in this file before passing values to the plugin,
+      # so these are never stored in plain text on disk.
+      # Add them to your .env file (or systemd EnvironmentFile, Docker secrets, etc.)
+      apiToken: "${FORGE_API_TOKEN}"         # forge.laravel.com/user/profile#/api
+      organization: "${FORGE_ORG_SLUG}"      # forge.laravel.com/orgs/{slug}
+
+      # How often to check Forge for changes. Minimum 10s.
+      pollInterval: "30s"
+
+      # Set a cert resolver to enable TLS for all sites automatically.
+      defaultCertResolver: "cloudflare"
+
+      # Generate HTTP→HTTPS redirect routers.
+      # When true and redirectMiddleware is empty, the plugin creates
+      # a forge-https-redirect middleware automatically.
+      httpRedirect: true
+
+      # Optional: reference an externally-defined redirect middleware instead.
+      # Useful if you want to share it with static config routers.
+      # redirectMiddleware: "https-redirect"
+
+      # Set to false for opt-in mode: only sites tagged traefik:enabled=true are routed.
+      # defaultSitesEnabled: true
+
+      # Optional: override IP or port for specific servers.
+      # Usually not needed — the plugin auto-detects private IPs from Forge.
+      # serverMappings:
+      #   - forgeServerName: "app01"
+      #     upstreamHost: "10.0.1.10"
+      #     upstreamPort: 80
+
+# --- Plugin installation ---
+# For production (Traefik Plugin Catalog):
+experimental:
+  plugins:
+    forge:
+      moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
+      version: v1.0.0
+
+# For local/development mode (clone the repo first):
+# experimental:
+#   localPlugins:
+#     forge:
+#       moduleName: github.com/Wicked-Sick-Ltd/traefik-laravel-forge
