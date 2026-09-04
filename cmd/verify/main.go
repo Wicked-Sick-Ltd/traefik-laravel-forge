@@ -123,8 +123,9 @@ func main() {
 
 		fmt.Printf("%-44s %-15s %-20s %s%s\n", name, eps, backend+tlsMark, r.Rule, "")
 
-		// Still collect primary host for --compare
-		if host := extractHost(r.Rule); host != "" {
+		// Collect every host the rule matches, so --compare does not report the
+		// www./wildcard variants of a multi-host rule as missing.
+		for _, host := range extractHosts(r.Rule) {
 			generatedHosts[host] = routerInfo{name: name, backend: backend, tls: r.TLS != nil}
 		}
 	}
@@ -212,18 +213,46 @@ type routerInfo struct {
 	tls     bool
 }
 
-// extractHost pulls the domain from a Traefik Host() rule, e.g. "Host(`example.com`)" -> "example.com".
-func extractHost(rule string) string {
-	start := strings.Index(rule, "Host(`")
-	if start == -1 {
-		return rule
+// extractHosts pulls every hostname out of a Traefik rule fragment. A rule may
+// carry several clauses — "Host(`a.com`) || Host(`www.a.com`)" yields both — and
+// a v3 wildcard clause such as HostRegexp(`^[^.]+\.a\.com$`) is normalised to
+// "*.a.com" so the two sides of --compare can be matched on equal terms.
+func extractHosts(rule string) []string {
+	var hosts []string
+
+	// Fold HostRegexp(`...`) into the same shape as Host(`...`) so a single scan
+	// picks up both; normaliseHostPattern converts the regexp body afterwards.
+	rest := strings.ReplaceAll(rule, "HostRegexp(`", "Host(`")
+	for {
+		_, after, found := strings.Cut(rest, "Host(`")
+		if !found {
+			break
+		}
+		host, tail, closed := strings.Cut(after, "`)")
+		if !closed {
+			break
+		}
+		if h := strings.TrimSpace(host); h != "" {
+			hosts = append(hosts, normaliseHostPattern(h))
+		}
+		rest = tail
 	}
-	start += len("Host(`")
-	end := strings.Index(rule[start:], "`)")
-	if end == -1 {
-		return rule
+
+	return hosts
+}
+
+// normaliseHostPattern turns the wildcard HostRegexp body the plugin generates
+// back into a readable "*.domain" form, and leaves plain hostnames untouched.
+func normaliseHostPattern(host string) string {
+	const wildcardPrefix = `^[^.]+\.`
+
+	if !strings.HasPrefix(host, wildcardPrefix) || !strings.HasSuffix(host, "$") {
+		return host
 	}
-	return rule[start : start+end]
+
+	domain := strings.TrimSuffix(strings.TrimPrefix(host, wildcardPrefix), "$")
+
+	return "*." + strings.ReplaceAll(domain, `\.`, ".")
 }
 
 // extractHostsFromConfig does a simple line-by-line scan of a YAML/TOML dynamic config
@@ -238,21 +267,10 @@ func extractHostsFromConfig(path string) (map[string]bool, error) {
 	hosts := make(map[string]bool)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := scanner.Text()
-		// Look for Host(`...`) anywhere in the line (handles YAML values and TOML values)
-		for {
-			_, after, found := strings.Cut(line, "Host(`")
-			if !found {
-				break
-			}
-			host, rest, closed := strings.Cut(after, "`)")
-			if !closed {
-				break
-			}
-			if h := strings.TrimSpace(host); h != "" {
-				hosts[h] = true
-			}
-			line = rest
+		// Reuse the generated-side parser so both halves of the comparison
+		// normalise hostnames and wildcard clauses identically.
+		for _, h := range extractHosts(scanner.Text()) {
+			hosts[h] = true
 		}
 	}
 	return hosts, scanner.Err()

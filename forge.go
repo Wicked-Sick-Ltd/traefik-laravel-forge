@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/traefik/genconf/dynamic"
@@ -63,10 +65,10 @@ type ForgeRelationships struct {
 
 // ForgeServer represents a server from the Forge API v2 (JSON:API format).
 type ForgeServer struct {
-	ID            string               `json:"id"`
-	Type          string               `json:"type"`
+	ID            string                `json:"id"`
+	Type          string                `json:"type"`
 	Attributes    ForgeServerAttributes `json:"attributes"`
-	Relationships ForgeRelationships   `json:"relationships"`
+	Relationships ForgeRelationships    `json:"relationships"`
 }
 
 // ForgeServerAttributes contains the server attributes.
@@ -81,10 +83,10 @@ type ForgeServerAttributes struct {
 
 // ForgeSite represents a site from the Forge API v2 (JSON:API format).
 type ForgeSite struct {
-	ID            string             `json:"id"`
-	Type          string             `json:"type"`
+	ID            string              `json:"id"`
+	Type          string              `json:"type"`
 	Attributes    ForgeSiteAttributes `json:"attributes"`
-	Relationships ForgeRelationships `json:"relationships"`
+	Relationships ForgeRelationships  `json:"relationships"`
 }
 
 // ForgeSiteAttributes contains the site attributes.
@@ -104,8 +106,8 @@ type ForgeReverbIntegration struct {
 
 // ForgeDomain represents a domain record attached to a Forge site.
 type ForgeDomain struct {
-	ID         string               `json:"id"`
-	Type       string               `json:"type"`
+	ID         string                `json:"id"`
+	Type       string                `json:"type"`
 	Attributes ForgeDomainAttributes `json:"attributes"`
 }
 
@@ -144,6 +146,7 @@ type Provider struct {
 	serverMappings      []ServerMapping
 	client              ForgeClient
 
+	mu     sync.Mutex
 	cancel func()
 }
 
@@ -212,7 +215,10 @@ func (p *Provider) Init() error {
 // Provide starts emitting dynamic configuration.
 func (p *Provider) Provide(cfgChan chan<- json.Marshaler) error {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	p.mu.Lock()
 	p.cancel = cancel
+	p.mu.Unlock()
 
 	go func() {
 		defer func() {
@@ -228,8 +234,12 @@ func (p *Provider) Provide(cfgChan chan<- json.Marshaler) error {
 
 // Stop halts the provider and its background goroutine.
 func (p *Provider) Stop() error {
-	if p.cancel != nil {
-		p.cancel()
+	p.mu.Lock()
+	cancel := p.cancel
+	p.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
 	return nil
 }
@@ -238,24 +248,42 @@ func (p *Provider) loadConfiguration(ctx context.Context, cfgChan chan<- json.Ma
 	ticker := time.NewTicker(p.pollInterval)
 	defer ticker.Stop()
 
-	p.sendConfiguration(cfgChan)
+	p.sendConfiguration(ctx, cfgChan)
 
 	for {
 		select {
 		case <-ticker.C:
-			p.sendConfiguration(cfgChan)
+			p.sendConfiguration(ctx, cfgChan)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func (p *Provider) sendConfiguration(cfgChan chan<- json.Marshaler) {
+// sendConfiguration pushes a freshly generated config to Traefik. On error it
+// sends nothing, so Traefik keeps the last configuration it received rather than
+// tearing down routers because of a transient Forge API failure.
+func (p *Provider) sendConfiguration(ctx context.Context, cfgChan chan<- json.Marshaler) {
 	configuration, err := p.generateConfiguration()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: error generating configuration: %v\n", err)
+		fmt.Fprintf(os.Stderr,
+			"forge: error generating configuration (keeping previous config): %v\n", err)
 		return
 	}
+
+	// Don't push a config that Stop() has already made irrelevant.
+	//
+	// This deliberately is NOT a `select` on ctx.Done() around the send. Traefik
+	// interprets this plugin with yaegi, which drives a select's send case through
+	// reflect.Select; converting *dynamic.JSONPayload to json.Marshaler there is
+	// not supported and panics at runtime. A bare send is the form every Traefik
+	// provider plugin uses, so keep it. The cost is that a send can still park if
+	// Traefik stops draining the channel — acceptable, since Traefik drains it for
+	// the life of the process.
+	if ctx.Err() != nil {
+		return
+	}
+
 	cfgChan <- &dynamic.JSONPayload{Configuration: configuration}
 }
 
@@ -317,24 +345,30 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	pluginLog.Printf("Fetched %d servers from Forge", len(servers))
 
 	for _, server := range servers {
-		p.processServer(server, configuration, redirectMiddlewareName)
+		if err := p.processServer(server, configuration, redirectMiddlewareName); err != nil {
+			return nil, err
+		}
 	}
 
 	return configuration, nil
 }
 
+// processServer adds routers for every enabled site on one Forge server.
+// A non-nil error means the server's routing state could not be determined —
+// the caller must abandon the whole poll rather than emit a partial config,
+// which Traefik would apply by deleting the missing routers.
 func (p *Provider) processServer(
 	server ForgeServer,
 	configuration *dynamic.Configuration,
 	redirectMiddlewareName string,
-) {
+) error {
 	tagConfig := ParseServerTags(server.Attributes.Tags)
 
 	// In multi-LB mode, skip servers not assigned to this instance.
 	if p.traefikID != "" && tagConfig.TraefikID != p.traefikID {
 		pluginLog.Printf("Server %q skipped (traefik-id=%q, want %q)",
 			server.Attributes.Name, tagConfig.TraefikID, p.traefikID)
-		return
+		return nil
 	}
 
 	// Look up an explicit server mapping from plugin config (lowest priority override).
@@ -356,8 +390,7 @@ func (p *Provider) processServer(
 
 	sites, err := p.client.FetchSites(server.ID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: failed to fetch sites for server %q: %v\n", server.Attributes.Name, err)
-		return
+		return fmt.Errorf("failed to fetch sites for server %q: %w", server.Attributes.Name, err)
 	}
 
 	pluginLog.Printf("Found %d sites on server %q", len(sites), server.Attributes.Name)
@@ -365,19 +398,25 @@ func (p *Provider) processServer(
 	// Skip the server entirely if none of its sites are enabled.
 	if !hasEnabledSites(sites, p.defaultSitesEnabled) {
 		pluginLog.Printf("Server %q has no enabled sites, skipping", server.Attributes.Name)
-		return
+		return nil
 	}
 
 	if upstreamHost == "" {
 		pluginLog.Printf("Server %q has enabled sites but no IP address — skipping", server.Attributes.Name)
-		return
+		return nil
 	}
 
 	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
 
 	for _, site := range sites {
-		p.processSite(site, server.ID, upstreamHost, upstreamPort, configuration, redirectMiddlewareName)
+		if err := p.processSite(
+			site, server.ID, upstreamHost, upstreamPort, configuration, redirectMiddlewareName,
+		); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
 // resolveUpstream determines the upstream host and port for a server using the
@@ -393,12 +432,16 @@ func (p *Provider) resolveUpstream(
 	switch {
 	case tagConfig.UpstreamHost != "":
 		return tagConfig.UpstreamHost, tagConfig.UpstreamPort
-	case mapping != nil:
-		mp := mapping.UpstreamPort
-		if mp == 0 {
-			mp = 80
-		}
-		return mapping.UpstreamHost, mp
+	case mapping != nil && mapping.UpstreamHost != "":
+		return mapping.UpstreamHost, mappingPort(mapping)
+	}
+
+	// A mapping may override only the port and leave the host to auto-detection.
+	if mapping != nil {
+		port = mappingPort(mapping)
+	}
+
+	switch {
 	case server.Attributes.PrivateIPAddress != "":
 		return server.Attributes.PrivateIPAddress, port
 	case server.Attributes.IPAddress != "":
@@ -406,6 +449,14 @@ func (p *Provider) resolveUpstream(
 	default:
 		return "", port
 	}
+}
+
+// mappingPort returns the mapping's upstream port, defaulting to 80 when unset.
+func mappingPort(mapping *ServerMapping) int {
+	if mapping.UpstreamPort == 0 {
+		return 80
+	}
+	return mapping.UpstreamPort
 }
 
 // hasEnabledSites reports whether any installed site in the list would be enabled
@@ -434,16 +485,18 @@ func isSiteEnabled(tags []string, defaultEnabled bool) bool {
 	return defaultEnabled
 }
 
+// processSite adds the routers for a single Forge site. As with processServer, a
+// non-nil error means routing state is unknown and the poll must be abandoned.
 func (p *Provider) processSite(
 	site ForgeSite,
 	serverID, upstreamHost string,
 	upstreamPort int,
 	configuration *dynamic.Configuration,
 	redirectMiddlewareName string,
-) {
+) error {
 	if site.Attributes.Status != "installed" {
 		pluginLog.Printf("Site %q status=%q, skipping", site.Attributes.Name, site.Attributes.Status)
-		return
+		return nil
 	}
 
 	defaults := siteDefaults{
@@ -456,15 +509,18 @@ func (p *Provider) processSite(
 
 	if !tags.Enabled {
 		pluginLog.Printf("Site %q disabled, skipping", site.Attributes.Name)
-		return
+		return nil
 	}
 
+	// A domains fetch failure is fatal to the poll: falling back to the site name
+	// here would silently swap every real customer hostname for the Forge site name.
 	domains, err := p.client.FetchDomains(serverID, site.ID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: failed to fetch domains for site %q: %v — falling back to site name\n",
-			site.Attributes.Name, err)
+		return fmt.Errorf("failed to fetch domains for site %q: %w", site.Attributes.Name, err)
 	}
 
+	// A Reverb failure only costs us the ability to single out the Reverb domain,
+	// which still routes to the same Nginx backend. Degrade instead of aborting.
 	reverb, err := p.client.FetchReverbIntegration(serverID, site.ID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: failed to fetch Reverb integration for site %q: %v\n",
@@ -513,7 +569,7 @@ func (p *Provider) processSite(
 	}
 
 	if routersCreated == 0 {
-		return
+		return nil
 	}
 
 	configuration.HTTP.Services[serviceName] = &dynamic.Service{
@@ -538,6 +594,8 @@ func (p *Provider) processSite(
 			}
 		}
 	}
+
+	return nil
 }
 
 // createDomainRouter creates a Traefik router for a single Forge domain record,
@@ -635,7 +693,6 @@ func createRouter(
 	}
 }
 
-
 // classifyDomains partitions enabled domain records into main domains and Reverb
 // domains. The reverbHost argument is authoritative — domain type alone is not
 // sufficient (see CLAUDE.md for details).
@@ -698,9 +755,10 @@ func parseSiteTags(tags []string, defaults siteDefaults) siteTagConfig {
 		case "tls":
 			cfg.EnableTLS = value == "true"
 		case "port":
-			var port int
-			if n, _ := fmt.Sscanf(value, "%d", &port); n == 1 {
+			if port, ok := parsePort(value); ok {
 				cfg.Port = port
+			} else {
+				pluginLog.Printf("Ignoring invalid traefik:port=%q (want 1-65535)", value)
 			}
 		case "http-redirect", "redirect":
 			cfg.HTTPRedirect = value == "true"
@@ -748,6 +806,17 @@ func ParseTagConfig(tag string) (key, value string, ok bool) {
 	return strings.TrimSpace(content), "true", true
 }
 
+// parsePort parses a TCP port from a tag value. Unlike fmt.Sscanf it rejects
+// trailing junk ("80x") and out-of-range values ("-1", "999999") outright rather
+// than silently routing traffic to a nonsense port.
+func parsePort(value string) (int, bool) {
+	port, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || port < 1 || port > 65535 {
+		return 0, false
+	}
+	return port, true
+}
+
 // ServerConfig holds configuration parsed from server-level tags.
 type ServerConfig struct {
 	UpstreamHost string
@@ -768,9 +837,10 @@ func ParseServerTags(tags []string) ServerConfig {
 		case "upstream-host", "upstreamhost", "lb-host", "loadbalancer-host":
 			cfg.UpstreamHost = value
 		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
-			var port int
-			if n, _ := fmt.Sscanf(value, "%d", &port); n == 1 {
+			if port, ok := parsePort(value); ok {
 				cfg.UpstreamPort = port
+			} else {
+				pluginLog.Printf("Ignoring invalid traefik:upstream-port=%q (want 1-65535)", value)
 			}
 		case "traefik", "traefik-id":
 			cfg.TraefikID = value

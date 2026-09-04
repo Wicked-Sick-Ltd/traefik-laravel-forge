@@ -609,3 +609,129 @@ func TestGenerateConfiguration_NoHTTPRedirectWithoutTLS(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, cfg.HTTP.Routers, 1)
 }
+
+// -- Fail-safe behavior on transient Forge API errors --
+//
+// A partial config is worse than no config: Traefik applies whatever it is given,
+// so a config that is missing routers causes Traefik to delete those routes and
+// take live sites offline. Every fetch that determines which routers exist must
+// therefore fail the whole poll, leaving Traefik on its last good configuration.
+
+func TestGenerateConfiguration_SitesFetchFailureAbortsPoll(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return(nil, assert.AnError)
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+
+	require.Error(t, err, "a sites fetch failure must not yield a routerless config")
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "app01")
+}
+
+func TestGenerateConfiguration_DomainsFetchFailureAbortsPoll(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "internal-name")}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return(nil, assert.AnError)
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+
+	require.Error(t, err, "falling back to the site name would drop every real customer hostname")
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "internal-name")
+}
+
+func TestGenerateConfiguration_OneServerFailureDoesNotSilentlyDropAnother(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{
+		makeServer("s1", "app01", "10.0.0.1"),
+		makeServer("s2", "app02", "10.0.0.2"),
+	}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil).Maybe()
+	m.EXPECT().FetchSites("s2").Return(nil, assert.AnError).Maybe()
+	noDomains(m, "s1", "site1")
+	noReverb(m, "s1", "site1")
+
+	_, err := newProvider(t, m).GenerateConfiguration()
+
+	require.Error(t, err)
+}
+
+// A Reverb failure only costs us the ability to single out the Reverb domain, so
+// it degrades rather than aborting — the site keeps its routers.
+func TestGenerateConfiguration_ReverbFetchFailureDegradesGracefully(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{makeDomain("example.com", "primary")}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(nil, assert.AnError)
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+
+	require.NoError(t, err)
+	assert.NotNil(t, cfg.HTTP.Routers["forge-site1-example.com"])
+}
+
+// -- serverMappings --
+
+// A mapping that overrides only the port must keep the auto-detected Forge IP.
+// Previously the empty UpstreamHost won the priority chain and the server — and
+// every site on it — was skipped entirely.
+func TestGenerateConfiguration_ServerMappingPortOnlyKeepsDetectedIP(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
+	noDomains(m, "s1", "site1")
+	noReverb(m, "s1", "site1")
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) {
+		c.ServerMappings = []forge.ServerMapping{{ForgeServerName: "app01", UpstreamPort: 8080}}
+	})
+
+	cfg, err := p.GenerateConfiguration()
+	require.NoError(t, err)
+
+	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
+	require.NotNil(t, svc, "server must not be skipped when a mapping sets only the port")
+	assert.Equal(t, "http://10.0.0.1:8080", svc.LoadBalancer.Servers[0].URL)
+}
+
+// -- Port tag validation --
+
+func TestGenerateConfiguration_InvalidPortTagFallsBackToDefault(t *testing.T) {
+	for _, value := range []string{"-1", "0", "999999", "80x", "abc"} {
+		t.Run(value, func(t *testing.T) {
+			m := mocks.NewMockForgeClient(t)
+			m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+			m.EXPECT().FetchSites("s1").
+				Return([]forge.ForgeSite{makeSite("site1", "example.com", "traefik:port="+value)}, nil)
+			noDomains(m, "s1", "site1")
+			noReverb(m, "s1", "site1")
+
+			cfg, err := newProvider(t, m).GenerateConfiguration()
+			require.NoError(t, err)
+
+			svc := cfg.HTTP.Services["forge-example.com-site1-service"]
+			require.NotNil(t, svc)
+			assert.Equal(t, "http://10.0.0.1:80", svc.LoadBalancer.Servers[0].URL,
+				"an unparseable port must not reach the backend URL")
+		})
+	}
+}
+
+func TestGenerateConfiguration_InvalidUpstreamPortTagFallsBackToDefault(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().
+		Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1", "traefik:upstream-port=-8080")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
+	noDomains(m, "s1", "site1")
+	noReverb(m, "s1", "site1")
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+	require.NoError(t, err)
+
+	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
+	require.NotNil(t, svc)
+	assert.Equal(t, "http://10.0.0.1:80", svc.LoadBalancer.Servers[0].URL)
+}

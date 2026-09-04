@@ -140,6 +140,15 @@ serverMappings:
     upstreamPort: 8080          # override default port 80
 ```
 
+Both override fields are optional. Omit `upstreamHost` to override only the port
+and keep the IP address auto-detected from Forge:
+
+```yaml
+serverMappings:
+  - forgeServerName: "app01"
+    upstreamPort: 8080
+```
+
 ## Multiple load balancers
 
 When running more than one Traefik instance, set `traefikID` so each instance only routes the servers assigned to it.
@@ -319,6 +328,32 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
 **Poll interval error**
 - Minimum is `10s`. Recommended `30s`–`60s` in production.
 
+**"Too many attempts" / HTTP 429 from Forge**
+- This plugin only calls the current `/api/orgs/...` JSON:API endpoints. Forge sunset
+  `/api/v1/*` on 1 September 2026, and requests against those removed routes can
+  trigger "Too many attempts" for the whole token — so check other tools sharing the
+  same API token first.
+- The plugin quotes Forge's `X-RateLimit-Limit` / `-Remaining` / `-Reset` headers in
+  the error when they are present. A 429 *without* those headers is not ordinary
+  quota exhaustion and increasing `pollInterval` will not fix it.
+- `pollInterval` lives in Traefik's **static** config, so changing it needs a Traefik
+  restart — and a restart while Forge is refusing every request brings Traefik up
+  with no routes at all until the first poll succeeds. Confirm the API is answering
+  before restarting.
+
+**Forge API errors in the logs, but routing still works**
+- This is intended. If any Forge call needed to determine routing fails, the plugin
+  abandons that poll entirely and sends nothing, so Traefik keeps the configuration
+  it already has. A partial config would be applied as a deletion and would take
+  live sites offline.
+- The log line to look for is `forge: error generating configuration (keeping previous config)`.
+- Routing only changes once a poll completes successfully end to end.
+
+**A `traefik:port` or `traefik:upstream-port` tag is being ignored**
+- Values must be whole numbers in the range 1–65535. Anything else (`-1`, `80x`,
+  `999999`) is rejected and the default is used, with a line in the Traefik log
+  naming the offending value.
+
 ## API rate limits
 
 Forge's default API rate limit is **60 requests per minute**.
@@ -342,6 +377,11 @@ As a rough guide for choosing `pollInterval`:
 | 10 | 22 | 30s |
 | 20 | 42 | 45s |
 | 25 | 52 | 60s |
+
+**The limit is per token, not per Traefik instance.** If several load balancers
+poll with the same `apiToken`, they share one budget — two instances at a 30s
+interval cost the same as one instance at 15s. Either give each instance its own
+Forge token, or size `pollInterval` against the combined rate.
 
 If you hit rate limits, Traefik logs will show Forge API errors. Increase `pollInterval` until they stop.
 

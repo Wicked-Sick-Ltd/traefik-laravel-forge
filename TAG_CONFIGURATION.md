@@ -62,6 +62,10 @@ traefik:port=8080
 traefik:port=3000
 ```
 
+Must be a whole number in the range 1–65535. Values that are out of range or that
+carry trailing characters (`-1`, `999999`, `80x`) are rejected, the default port is
+used instead, and the offending value is named in the Traefik log.
+
 Does not affect the Reverb router — Reverb traffic routes through Nginx on port 80.
 
 ---
@@ -163,6 +167,9 @@ Override the default backend port (80) for all sites on this server. Can be over
 ```
 traefik:upstream-port=8080
 ```
+
+Validated the same way as `traefik:port` — must be 1–65535, and an invalid value
+falls back to port 80 with a log line rather than being applied.
 
 Aliases: `traefik:lb-port`, `traefik:loadbalancer-port`
 

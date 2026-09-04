@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
+
+// maxErrorBodyBytes caps how much of a failed response body is quoted back in an
+// error, so a Forge HTML error page cannot flood the Traefik log.
+const maxErrorBodyBytes = 512
 
 // ForgeServersResponse is the JSON:API response from listing servers.
 type ForgeServersResponse struct {
@@ -121,8 +126,7 @@ func (c *forgeHTTPClient) fetchServersRaw() ([]ForgeServer, json.RawMessage, err
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, statusError(resp)
 	}
 
 	raw, err := io.ReadAll(resp.Body)
@@ -155,8 +159,7 @@ func (c *forgeHTTPClient) fetchSitesRaw(serverID string) ([]ForgeSite, json.RawM
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, nil, fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, statusError(resp)
 	}
 
 	raw, err := io.ReadAll(resp.Body)
@@ -173,7 +176,15 @@ func (c *forgeHTTPClient) fetchSitesRaw(serverID string) ([]ForgeSite, json.RawM
 	return sitesResp.Data, json.RawMessage(raw), nil
 }
 
-// fetchRaw performs a GET and returns the response body, or nil for non-200 responses.
+// fetchRaw performs a GET and returns the response body.
+//
+// A response that simply says the resource is not there (most often 404 — a site
+// with no Reverb integration) yields (nil, nil): genuinely absent, not a failure.
+// Anything that means "your request did not get answered" — 429, 5xx, or an auth
+// failure — is an error. Returning (nil, nil) for those is indistinguishable from
+// an empty result, and callers turn an empty result into routing decisions: a
+// rate-limited /domains call would silently become "this site has no domains" and
+// replace every customer hostname with the Forge site name.
 func (c *forgeHTTPClient) fetchRaw(url string) (json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
@@ -187,6 +198,9 @@ func (c *forgeHTTPClient) fetchRaw(url string) (json.RawMessage, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if isTransportFailure(resp.StatusCode) {
+		return nil, statusError(resp)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil
 	}
@@ -196,6 +210,34 @@ func (c *forgeHTTPClient) fetchRaw(url string) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.RawMessage(body), nil
+}
+
+// isTransportFailure reports whether a status code means the request was refused
+// or failed rather than answered. Codes outside this set (404, 422, ...) are
+// treated as "the resource is not there", which is a legitimate answer.
+func isTransportFailure(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= http.StatusInternalServerError
+}
+
+// statusError builds an error for a non-OK response, including Forge's
+// X-RateLimit-* headers. Those headers are what distinguish genuine quota
+// exhaustion from the "Too many attempts" Forge returns for other reasons, and
+// without them in the log a 429 is undiagnosable from the outside.
+func statusError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	detail := strings.TrimSpace(string(body))
+
+	if remaining := resp.Header.Get("X-Ratelimit-Remaining"); remaining != "" {
+		return fmt.Errorf("forge API returned status %d (rate limit %s, remaining %s, reset %s): %s",
+			resp.StatusCode, resp.Header.Get("X-Ratelimit-Limit"), remaining,
+			resp.Header.Get("X-Ratelimit-Reset"), detail)
+	}
+
+	return fmt.Errorf("forge API returned status %d: %s", resp.StatusCode, detail)
 }
 
 func (c *forgeHTTPClient) setHeaders(req *http.Request) {

@@ -47,6 +47,75 @@ Traefik v2 uses named groups (`{subdomain:[a-z]+}.example.com`) which is incompa
 
 All responses use the [JSON:API](https://jsonapi.org) envelope format with `data`, `included`, `links`, `meta`. Related resources (like tags) come in `included` and are referenced by ID from `relationships`. The `fetchForgeServersRaw` and `fetchForgeSitesRaw` methods handle this.
 
+## Yaegi constraints (the plugin's real runtime)
+
+Traefik does not compile this plugin — it interprets it with [Yaegi](https://github.com/traefik/yaegi).
+Code that compiles and passes `go test` can still fail in production. Two rules follow:
+
+- **Root-package tests must not import testify.** CI runs `yaegi test .`, and testify
+  reaches `unsafe` via go-spew, which Yaegi cannot interpret. `forge_test.go` and
+  `client_test.go` use plain `testing` only. Testify-based tests live in `integration/`,
+  which is a separate directory so `yaegi test .` never sees them.
+- **Never wrap the `cfgChan` send in a `select`.** Yaegi drives a select's send case
+  through `reflect.Select`, which cannot convert `*dynamic.JSONPayload` to
+  `json.Marshaler` and panics at runtime. Use a bare `cfgChan <- ...`, as every
+  Traefik provider plugin does. See the comment in `sendConfiguration`.
+
+## Error policy: never emit a partial configuration
+
+Traefik applies whatever the plugin sends, so a config that is missing routers is
+applied as a *deletion* and takes live sites offline. Any Forge call that determines
+which routers exist — `FetchServers`, `FetchSites`, `FetchDomains` — must therefore
+fail the whole poll rather than skipping a server or a site. `sendConfiguration` then
+sends nothing and Traefik keeps its last good configuration until a poll succeeds
+end to end.
+
+`FetchReverbIntegration` is the exception: losing it only means the Reverb domain is
+not singled out, and it still routes to the same Nginx backend, so it degrades with a
+log line instead of aborting.
+
+When adding a new Forge call, decide which of those two categories it is in.
+
+### "Not there" and "not answered" are different
+
+`fetchRaw` must not collapse every non-200 into `(nil, nil)`. An empty result is a
+routing decision — an empty `/domains` result makes the caller fall back to the
+Forge *site name* and replace every customer hostname — so a refused request that
+looks empty silently rewrites live routing.
+
+- **404, 422, other non-200** → `(nil, nil)`. The resource is genuinely absent; a
+  site with no Reverb integration is the normal case.
+- **401, 403, 429, 5xx** → error. The request was refused or failed, and the answer
+  is unknown. `isTransportFailure` holds this list.
+
+Errors are built by `statusError`, which quotes Forge's `X-RateLimit-Limit`,
+`X-RateLimit-Remaining` and `X-RateLimit-Reset` headers when present. That matters:
+Forge returns "Too many attempts" both for genuine quota exhaustion (headers
+present) and for other throttling paths (headers absent), and the two are
+indistinguishable in a log without them.
+
+### The plugin only calls current JSON:API endpoints
+
+Every URL is `/api/orgs/{org}/...`. Forge sunset `/api/v1/*` on 1 September 2026 and
+those paths now 404; a burst of requests against removed routes is itself enough to
+trigger "Too many attempts" across the whole token. If Forge starts returning 429,
+check the *other* tools sharing the token before suspecting this plugin — grep for
+`api/v1` across the fleet. Confirmed with Forge support, September 2026.
+
+## Local toolchain
+
+`go.mod` and both CI workflows pin **Go 1.22**. On a machine running a newer Go, both
+`make lint` and `make yaegi_test` fail for toolchain reasons rather than code reasons
+(golangci-lint cannot read newer export data; Yaegi segfaults). Run lint with the
+pinned toolchain:
+
+```bash
+GOTOOLCHAIN=go1.22.12 golangci-lint run
+```
+
+Note that Go 1.22 test *binaries* may not run on recent macOS (`missing LC_UUID`), so
+run `go test ./...` on the default toolchain and `golangci-lint` on the pinned one.
+
 ## What the plugin owns vs. what stays in static config
 
 **Plugin owns:** Everything that is a Forge-managed site — HTTP routers, HTTPS routers, HTTP redirect routers, Reverb WebSocket routers.

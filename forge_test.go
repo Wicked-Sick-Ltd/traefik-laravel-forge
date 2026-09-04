@@ -2,6 +2,7 @@ package traefik_laravel_forge
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -519,4 +520,162 @@ func TestDomainPriority(t *testing.T) {
 			}
 		})
 	}
+}
+
+// -- Port parsing --
+
+func TestParsePort(t *testing.T) {
+	tests := []struct {
+		value    string
+		wantPort int
+		wantOK   bool
+	}{
+		{"80", 80, true},
+		{"8080", 8080, true},
+		{"1", 1, true},
+		{"65535", 65535, true},
+		{" 8080 ", 8080, true},
+		{"0", 0, false},
+		{"-1", 0, false},
+		{"65536", 0, false},
+		{"999999", 0, false},
+		{"80x", 0, false},
+		{"abc", 0, false},
+		{"", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			port, ok := parsePort(tt.value)
+			if ok != tt.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if port != tt.wantPort {
+				t.Errorf("port = %d, want %d", port, tt.wantPort)
+			}
+		})
+	}
+}
+
+// -- Upstream resolution priority --
+
+func TestResolveUpstream(t *testing.T) {
+	bothIPs := ForgeServer{Attributes: ForgeServerAttributes{
+		Name:             "app01",
+		PrivateIPAddress: "10.0.0.1",
+		IPAddress:        "203.0.113.1",
+	}}
+	publicOnly := ForgeServer{Attributes: ForgeServerAttributes{Name: "app01", IPAddress: "203.0.113.1"}}
+	noIP := ForgeServer{Attributes: ForgeServerAttributes{Name: "app01"}}
+
+	tests := []struct {
+		name     string
+		server   ForgeServer
+		tag      ServerConfig
+		mapping  *ServerMapping
+		wantHost string
+		wantPort int
+	}{
+		{
+			name:     "tag wins over mapping and auto-detection",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamHost: "172.16.0.1", UpstreamPort: 9000},
+			mapping:  &ServerMapping{UpstreamHost: "192.168.0.1", UpstreamPort: 8080},
+			wantHost: "172.16.0.1",
+			wantPort: 9000,
+		},
+		{
+			name:     "mapping wins over auto-detection",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 80},
+			mapping:  &ServerMapping{UpstreamHost: "192.168.0.1", UpstreamPort: 8080},
+			wantHost: "192.168.0.1",
+			wantPort: 8080,
+		},
+		{
+			name:     "port-only mapping keeps the auto-detected private IP",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 80},
+			mapping:  &ServerMapping{ForgeServerName: "app01", UpstreamPort: 8080},
+			wantHost: "10.0.0.1",
+			wantPort: 8080,
+		},
+		{
+			name:     "empty mapping falls back entirely",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 80},
+			mapping:  &ServerMapping{ForgeServerName: "app01"},
+			wantHost: "10.0.0.1",
+			wantPort: 80,
+		},
+		{
+			name:     "private IP preferred over public",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 80},
+			wantHost: "10.0.0.1",
+			wantPort: 80,
+		},
+		{
+			name:     "public IP used when there is no private one",
+			server:   publicOnly,
+			tag:      ServerConfig{UpstreamPort: 80},
+			wantHost: "203.0.113.1",
+			wantPort: 80,
+		},
+		{
+			name:     "no address at all yields no host",
+			server:   noIP,
+			tag:      ServerConfig{UpstreamPort: 80},
+			wantHost: "",
+			wantPort: 80,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Provider{}
+			host, port := p.resolveUpstream(tt.server, tt.tag, tt.mapping)
+			if host != tt.wantHost {
+				t.Errorf("host = %q, want %q", host, tt.wantHost)
+			}
+			if port != tt.wantPort {
+				t.Errorf("port = %d, want %d", port, tt.wantPort)
+			}
+		})
+	}
+}
+
+// -- Lifecycle --
+
+// Stop must be safe to call at any point in the lifecycle: after Provide, twice
+// in a row, and on a provider that never started.
+func TestStopIsSafeAndIdempotent(t *testing.T) {
+	p, err := NewProviderWithClient(&Config{PollInterval: "30s"}, stubClient{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfgChan := make(chan json.Marshaler) // deliberately never drained
+	if err := p.Provide(cfgChan); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	// Stop must be idempotent, and safe on a provider that never ran.
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Provider{}).Stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type stubClient struct{}
+
+func (stubClient) FetchServers() ([]ForgeServer, error)               { return nil, nil }
+func (stubClient) FetchSites(string) ([]ForgeSite, error)             { return nil, nil }
+func (stubClient) FetchDomains(string, string) ([]ForgeDomain, error) { return nil, nil }
+func (stubClient) FetchReverbIntegration(string, string) (*ForgeReverbIntegration, error) {
+	return nil, nil
 }
