@@ -302,3 +302,60 @@ func TestWarmPollBurstIsOnlyServerAndSiteLists(t *testing.T) {
 		t.Errorf("warm poll made %d calls, want 3 (servers + 2 site lists)", c.calls)
 	}
 }
+
+// Setting cacheTTL to zero is the documented escape hatch for turning caching
+// off. It must disable the stale-on-error path too, not just the fresh read:
+// otherwise entries are still stored, and the first fetch error serves a stale
+// value indefinitely to someone who asked for no caching at all.
+func TestZeroTTLAlsoDisablesStaleServing(t *testing.T) {
+	clock := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	c := &countingClient{domains: testDomains("a.example.com")}
+	p := testProvider(t, c, "0s", &clock)
+
+	if _, err := p.siteLookupFor("1", testSite("10", "a.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	c.failDomains = true
+
+	if _, err := p.siteLookupFor("1", testSite("10", "a.example.com")); err == nil {
+		t.Fatal("with caching disabled a fetch error must propagate, not serve a stale entry")
+	}
+}
+
+// A Reverb failure must not be cached for a full TTL. Before the cache existed
+// a transient 429 on /integrations/reverb self-corrected on the very next poll;
+// storing the failed lookup with a full expiry would misclassify the Reverb
+// domain for up to 2*TTL, which is a regression against pre-cache behavior.
+func TestFailedReverbIsRetriedOnNextPoll(t *testing.T) {
+	clock := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	c := &countingClient{domains: testDomains("a.example.com"), reverbHost: "ws.a.example.com", failReverb: true}
+	p := testProvider(t, c, "10m", &clock)
+
+	got, err := p.siteLookupFor("1", testSite("10", "a.example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.reverbHost != "" {
+		t.Fatalf("reverbHost = %q, want empty while the fetch is failing", got.reverbHost)
+	}
+
+	// Forge recovers, and the next poll comes round.
+	c.failReverb = false
+	clock = clock.Add(30 * time.Second)
+
+	got, err = p.siteLookupFor("1", testSite("10", "a.example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.reverbCalls != 2 {
+		t.Errorf("reverb fetched %d times, want 2 — a failed Reverb lookup must be retried", c.reverbCalls)
+	}
+	// The retry must cover only the Reverb half. Refetching domains as well
+	// would put the per-poll burst back to two requests per site.
+	if c.domainCalls != 1 {
+		t.Errorf("domains fetched %d times, want 1 — the Reverb retry must not refetch domains", c.domainCalls)
+	}
+	if got.reverbHost != "ws.a.example.com" {
+		t.Errorf("reverbHost = %q, want the recovered host", got.reverbHost)
+	}
+}
