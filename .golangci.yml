@@ -19,6 +19,14 @@ linters:
     - maintidx
     - nestif
 
+    # ---- Traefik interprets this plugin with yaegi (v0.16.1), which cannot
+    #      type Go 1.22 range-over-int. `for i := range n` makes the interpreter
+    #      panic with "nil type" at scope.go:207, so the plugin fails to load at
+    #      runtime even though it builds, tests and lints cleanly under the Go
+    #      toolchain. Verified 2026-09-04 with `yaegi test .`. Classic
+    #      three-clause for loops are required; do not re-enable this. ----
+    - intrange
+
     # ---- Style / formatting preferences ----
     - nlreturn    # blank lines before returns — too noisy
     - wsl         # aggressive whitespace rules

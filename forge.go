@@ -33,6 +33,7 @@ type Config struct {
 	APIToken            string          `json:"apiToken,omitempty"`
 	Organization        string          `json:"organization,omitempty"`
 	PollInterval        string          `json:"pollInterval,omitempty"`
+	CacheTTL            string          `json:"cacheTTL,omitempty"`
 	DefaultCertResolver string          `json:"defaultCertResolver,omitempty"`
 	DefaultSitesEnabled bool            `json:"defaultSitesEnabled,omitempty"`
 	HTTPRedirect        bool            `json:"httpRedirect,omitempty"`
@@ -45,6 +46,7 @@ type Config struct {
 func CreateConfig() *Config {
 	return &Config{
 		PollInterval:        "30s",
+		CacheTTL:            "10m",
 		DefaultSitesEnabled: true,
 		ServerMappings:      []ServerMapping{},
 	}
@@ -146,6 +148,12 @@ type Provider struct {
 	serverMappings      []ServerMapping
 	client              ForgeClient
 
+	cacheTTL time.Duration
+	now      func() time.Time
+
+	lookupMu sync.Mutex
+	lookups  map[string]siteLookup
+
 	mu     sync.Mutex
 	cancel func()
 }
@@ -159,9 +167,15 @@ func NewProviderWithClient(config *Config, client ForgeClient) (*Provider, error
 	if err != nil {
 		return nil, err
 	}
+	ttl, err := parseCacheTTL(config.CacheTTL)
+	if err != nil {
+		return nil, err
+	}
 	return &Provider{
 		name:                "custom",
 		pollInterval:        pi,
+		cacheTTL:            ttl,
+		lookups:             map[string]siteLookup{},
 		defaultCertResolver: config.DefaultCertResolver,
 		defaultSitesEnabled: config.DefaultSitesEnabled,
 		httpRedirect:        config.HTTPRedirect,
@@ -186,9 +200,16 @@ func New(_ context.Context, config *Config, name string) (*Provider, error) {
 		return nil, err
 	}
 
+	ttl, err := parseCacheTTL(config.CacheTTL)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Provider{
 		name:                name,
 		apiToken:            config.APIToken,
+		cacheTTL:            ttl,
+		lookups:             map[string]siteLookup{},
 		organization:        config.Organization,
 		pollInterval:        pi,
 		defaultCertResolver: config.DefaultCertResolver,
@@ -208,6 +229,9 @@ func (p *Provider) Init() error {
 	}
 	if p.pollInterval < 10*time.Second {
 		return fmt.Errorf("poll interval must be at least 10s, got %s", p.pollInterval)
+	}
+	if p.cacheTTL < 0 {
+		return fmt.Errorf("cacheTTL must not be negative, got %s", p.cacheTTL)
 	}
 	return nil
 }
@@ -512,28 +536,16 @@ func (p *Provider) processSite(
 		return nil
 	}
 
-	// A domains fetch failure is fatal to the poll: falling back to the site name
-	// here would silently swap every real customer hostname for the Forge site name.
-	domains, err := p.client.FetchDomains(serverID, site.ID)
+	// Domains and the Reverb integration come from the cache. These two calls are
+	// the bulk of a poll's request volume (two per site), and caching them keeps
+	// the burst small enough to stay inside Forge's 60 requests/minute. A domains
+	// failure with nothing cached is still fatal to the poll: falling back to the
+	// site name would silently swap every real customer hostname for the Forge one.
+	lookup, err := p.siteLookupFor(serverID, site)
 	if err != nil {
-		return fmt.Errorf("failed to fetch domains for site %q: %w", site.Attributes.Name, err)
+		return err
 	}
-
-	// A Reverb failure only costs us the ability to single out the Reverb domain,
-	// which still routes to the same Nginx backend. Degrade instead of aborting.
-	reverb, err := p.client.FetchReverbIntegration(serverID, site.ID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: failed to fetch Reverb integration for site %q: %v\n",
-			site.Attributes.Name, err)
-	}
-
-	// We only need the Reverb host to identify which domain record belongs to
-	// Reverb — traffic is routed to Nginx (same backend as the main site), which
-	// handles the WebSocket proxy internally. We never talk to Reverb directly.
-	reverbHost := ""
-	if reverb != nil {
-		reverbHost = reverb.Host
-	}
+	domains, reverbHost := lookup.domains, lookup.reverbHost
 
 	mainDomains, reverbDomains := classifyDomains(domains, reverbHost)
 
