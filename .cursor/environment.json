@@ -1,0 +1,4 @@
+{
+  "name": "traefik-laravel-forge",
+  "install": "bash .cursor/install.sh"
+}
