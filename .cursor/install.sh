@@ -2,10 +2,12 @@
 # Idempotent Cloud Agent bootstrap for the traefik-laravel-forge plugin.
 #
 # The base image already provides Go 1.22 (the version pinned in go.mod and both
-# CI workflows) with $(go env GOPATH)/bin on PATH. This script adds the two extra
-# tools CI uses and primes the caches:
+# CI workflows). This script adds the two extra tools CI uses and primes caches:
 #   - golangci-lint  (make lint)
 #   - yaegi          (make yaegi_test — the real Traefik plugin runtime)
+#
+# It is self-contained: it puts $(go env GOPATH)/bin on PATH itself rather than
+# assuming the ambient install-shell PATH already contains it.
 set -euo pipefail
 
 # Versions kept in lockstep with .github/workflows/main.yml.
@@ -14,12 +16,12 @@ YAEGI_VERSION="v0.16.1"
 
 GOBIN="$(go env GOPATH)/bin"
 mkdir -p "$GOBIN"
+export PATH="$GOBIN:$PATH"
 
 echo "==> Go toolchain: $(go version)"
 
 install_golangci_lint() {
-  if command -v golangci-lint >/dev/null 2>&1 &&
-     golangci-lint version 2>&1 | grep -q "${GOLANGCI_LINT_VERSION#v}"; then
+  if "$GOBIN/golangci-lint" version 2>/dev/null | grep -q "${GOLANGCI_LINT_VERSION#v}"; then
     echo "==> golangci-lint ${GOLANGCI_LINT_VERSION} already installed"
     return
   fi
@@ -29,8 +31,7 @@ install_golangci_lint() {
 }
 
 install_yaegi() {
-  if command -v yaegi >/dev/null 2>&1 &&
-     yaegi version 2>&1 | grep -q "${YAEGI_VERSION#v}"; then
+  if "$GOBIN/yaegi" version 2>/dev/null | grep -q "${YAEGI_VERSION#v}"; then
     echo "==> yaegi ${YAEGI_VERSION} already installed"
     return
   fi
@@ -49,5 +50,5 @@ echo "==> Priming build/test cache"
 CGO_ENABLED=0 go build ./...
 
 echo "==> Bootstrap complete"
-echo "    golangci-lint: $(golangci-lint version 2>&1 | head -1)"
-echo "    yaegi:         $(yaegi version 2>&1 | head -1)"
+echo "    golangci-lint: $("$GOBIN/golangci-lint" version 2>&1 | head -1)"
+echo "    yaegi:         v$("$GOBIN/yaegi" version 2>&1 | head -1)"
