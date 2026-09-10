@@ -190,4 +190,6 @@ traefik.example.yml   # example static config for new users
 README.md             # main docs
 TAG_CONFIGURATION.md  # complete tag reference
 MIGRATION_FROM_STATIC.md  # migration guide
+AGENTS.md             # pointer so non-Claude agents load this file
+docs/cross-ai-marketplace-plan.md  # org plugin marketplace plan (not Traefik runtime)
 ```
