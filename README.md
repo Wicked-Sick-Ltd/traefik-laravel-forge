@@ -389,6 +389,8 @@ If you have a large number of sites and need a higher limit, Forge allows you to
 
 ## Development
 
+Agent instructions for Claude, Cursor, Copilot, Codex, and Grok live in [`CLAUDE.md`](CLAUDE.md) (source of truth) and [`AGENTS.md`](AGENTS.md) (discovery pointer). Cross-AI plugin marketplace layout is in [`docs/cross-ai-marketplace-plan.md`](docs/cross-ai-marketplace-plan.md).
+
 ```bash
 # Run tests
 go test ./...
