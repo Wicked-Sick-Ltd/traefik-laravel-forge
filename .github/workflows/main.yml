@@ -41,8 +41,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      # Pinned action instead of curl|sh (gha-curl-pipe-shell). install-only keeps
-      # `make` as the lint/test entrypoint so local and CI stay the same.
+      # SHA-pinned official action, install-only so `make` stays the lint entrypoint.
       - name: Install golangci-lint ${{ env.GOLANGCI_LINT_VERSION }}
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -50,7 +49,7 @@ jobs:
           install-only: true
           working-directory: go/src/github.com/${{ github.repository }}
 
-      # Module checksums via the Go checksum database; no remote install.sh.
+      # Version-pinned module install; Go checksum database verifies the bits.
       - name: Install Yaegi ${{ env.YAEGI_VERSION }}
         run: go install github.com/traefik/yaegi/cmd/yaegi@${{ env.YAEGI_VERSION }}
 
