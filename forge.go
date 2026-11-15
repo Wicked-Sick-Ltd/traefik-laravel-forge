@@ -430,7 +430,8 @@ func (p *Provider) processServer(
 		return nil
 	}
 
-	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
+	pluginLog.Printf("Processing server %q -> %q", server.Attributes.Name,
+		fmt.Sprintf("http://%s:%d", upstreamHost, upstreamPort))
 
 	for _, site := range sites {
 		if err := p.processSite(
@@ -591,7 +592,7 @@ func (p *Provider) processSite(
 		},
 	}
 
-	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
+	pluginLog.Printf("Created %d router(s) for site %q -> %q", routersCreated, site.Attributes.Name, siteBackendURL)
 
 	// Reverb domains route through the same Nginx backend as the main site.
 	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
@@ -601,7 +602,7 @@ func (p *Provider) processSite(
 		noRedirectTags.HTTPRedirect = false
 		for _, rd := range reverbDomains {
 			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
-				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %q (via Nginx)",
 					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
 			}
 		}
@@ -829,6 +830,38 @@ func parsePort(value string) (int, bool) {
 	return port, true
 }
 
+// validUpstreamHost reports whether value can stand alone as the host in
+// "http://host:port". Tag values are set by any Forge member who can edit a
+// server, so anything outside hostname characters is refused: a newline would
+// split plugin log records, and ":", "/", "@" or "#" would change what the
+// backend URL points at.
+func validUpstreamHost(value string) bool {
+	if value == "" || len(value) > 253 {
+		return false
+	}
+	for _, r := range value {
+		if !isHostnameRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isHostnameRune uses plain ifs on purpose: under Yaegi, a tagless switch with
+// empty multi-expression cases fell through to default and rejected valid hosts.
+func isHostnameRune(r rune) bool {
+	if r >= 'a' && r <= 'z' {
+		return true
+	}
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	return r == '.' || r == '-' || r == '_'
+}
+
 // ServerConfig holds configuration parsed from server-level tags.
 type ServerConfig struct {
 	UpstreamHost string
@@ -847,7 +880,11 @@ func ParseServerTags(tags []string) ServerConfig {
 		}
 		switch key {
 		case "upstream-host", "upstreamhost", "lb-host", "loadbalancer-host":
-			cfg.UpstreamHost = value
+			if validUpstreamHost(value) {
+				cfg.UpstreamHost = value
+			} else {
+				pluginLog.Printf("Ignoring invalid traefik:%s=%q (want a hostname or IPv4 address)", key, value)
+			}
 		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
 			if port, ok := parsePort(value); ok {
 				cfg.UpstreamPort = port
