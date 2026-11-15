@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -430,7 +431,16 @@ func (p *Provider) processServer(
 		return nil
 	}
 
-	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
+	upstreamIP := privateNetworkIP(upstreamHost)
+	if upstreamIP == nil {
+		pluginLog.Printf("Server %q upstream %q is not a private or loopback IP address — "+
+			"not publishing its sites, because backends are dialed over cleartext HTTP",
+			server.Attributes.Name, upstreamHost)
+		return nil
+	}
+	upstreamHost = upstreamIP.String()
+
+	pluginLog.Printf("Processing server %q -> %s", server.Attributes.Name, originURL(upstreamHost, upstreamPort))
 
 	for _, site := range sites {
 		if err := p.processSite(
@@ -473,6 +483,31 @@ func (p *Provider) resolveUpstream(
 	default:
 		return "", port
 	}
+}
+
+// privateNetworkIP returns host as a parsed IP when it is a literal private
+// (RFC 1918 / RFC 4193) or loopback address, and nil otherwise. Backends are
+// dialed over cleartext HTTP, so anything else — a public IP, or a hostname whose
+// resolution the plugin cannot vouch for — would expose proxied requests,
+// cookies included, to every network between Traefik and the origin.
+func privateNetworkIP(host string) net.IP {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	if ip.IsPrivate() || ip.IsLoopback() {
+		return ip
+	}
+	return nil
+}
+
+// originURL builds the cleartext backend URL. Only call it with a host that
+// privateNetworkIP accepted.
+func originURL(host string, port int) string {
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // mappingPort returns the mapping's upstream port, defaulting to 80 when unset.
@@ -560,7 +595,7 @@ func (p *Provider) processSite(
 	}
 
 	serviceName := fmt.Sprintf("forge-%s-%s-service", site.Attributes.Name, site.ID)
-	siteBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port)
+	siteBackendURL := originURL(upstreamHost, tags.Port)
 
 	// One router per Forge domain record.
 	routersCreated := 0

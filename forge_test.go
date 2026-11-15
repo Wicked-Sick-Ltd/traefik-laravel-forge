@@ -645,6 +645,58 @@ func TestResolveUpstream(t *testing.T) {
 	}
 }
 
+// -- Cleartext origin gate --
+
+func TestPrivateNetworkIP(t *testing.T) {
+	tests := []struct {
+		host string
+		want string // "" means rejected
+	}{
+		{"10.0.0.1", "10.0.0.1"},
+		{"172.16.4.4", "172.16.4.4"},
+		{"192.168.1.9", "192.168.1.9"},
+		{"127.0.0.1", "127.0.0.1"},
+		{"fd00::5", "fd00::5"},
+		{"::1", "::1"},
+		{"::ffff:10.0.0.1", "10.0.0.1"},
+		{"203.0.113.10", ""},
+		{"2001:db8::10", ""},
+		{"::ffff:203.0.113.40", ""},
+		{"100.64.0.1", ""},
+		{"169.254.169.254", ""},
+		{"fe80::1", ""},
+		{"fe80::1%eth0", ""},
+		{"0.0.0.0", ""},
+		{"::", ""},
+		{"010.0.0.1", ""},
+		{"10.0.0.1:80", ""},
+		{"origin.example.com", ""},
+		{"localhost", ""},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			got := ""
+			if ip := privateNetworkIP(tt.host); ip != nil {
+				got = ip.String()
+			}
+			if got != tt.want {
+				t.Errorf("privateNetworkIP(%q) = %q, want %q", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOriginURL(t *testing.T) {
+	if got := originURL("10.0.0.1", 8080); got != "http://10.0.0.1:8080" {
+		t.Errorf("originURL(v4) = %q", got)
+	}
+	if got := originURL("fd00::5", 80); got != "http://[fd00::5]:80" {
+		t.Errorf("originURL(v6) = %q", got)
+	}
+}
+
 // -- Lifecycle --
 
 // Stop must be safe to call at any point in the lifecycle: after Provide, twice

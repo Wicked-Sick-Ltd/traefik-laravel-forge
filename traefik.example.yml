@@ -68,6 +68,8 @@ providers:
 
       # Optional: override IP or port for specific servers.
       # Usually not needed — the plugin auto-detects private IPs from Forge.
+      # upstreamHost must be a private or loopback IP: backends are dialed over
+      # cleartext HTTP, so servers with a public or hostname upstream are skipped.
       # serverMappings:
       #   - forgeServerName: "app01"
       #     upstreamHost: "10.0.1.10"

@@ -102,6 +102,19 @@ trigger "Too many attempts" across the whole token. If Forge starts returning 42
 check the *other* tools sharing the token before suspecting this plugin — grep for
 `api/v1` across the fleet. Confirmed with Forge support, September 2026.
 
+## Origins are cleartext, so only private addresses are published
+
+Every service URL is `http://`, and Traefik has already terminated client TLS, so
+the hop to the origin carries cookies and request bodies in the clear.
+`processServer` therefore publishes a server only when its resolved upstream (tag,
+mapping, or Forge auto-detection) parses as a private or loopback IP literal
+(`privateNetworkIP`). Public IPs, link-local, CGNAT, and hostnames are skipped with a
+log line, and there is no fallback to Forge's public `ip_address`. The URL is built
+from the parsed IP, so the address that was checked is the address that is dialed.
+Skipping is a deterministic routing decision, not a fetch failure, so it does not
+abort the poll. Don't add a code path that builds a service URL without going
+through that check.
+
 ## Local toolchain
 
 `go.mod` and both CI workflows pin **Go 1.22**. On a machine running a newer Go, both

@@ -39,6 +39,7 @@ Not everything belongs in the plugin. Keep static files for:
 | Traefik API dashboard | Unrelated to Forge |
 | Shared middleware definitions | Define once, reference by name from multiple routers |
 | WebSocket routes with non-standard ports not in Forge | If the port isn't in Forge's Reverb integration, use static config |
+| Backends Traefik reaches over a public address | The plugin only publishes private or loopback origins over cleartext HTTP; a public origin needs an explicit `https://` service URL you manage yourself |
 
 ## Migration steps
 

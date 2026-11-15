@@ -150,11 +150,17 @@ Add these to a server in Forge (Servers → your server → Tags).
 
 ### `traefik:upstream-host`
 
-Override the IP address used to reach this server. By default the plugin uses `private_ip_address` from Forge, falling back to `ip_address`.
+Override the IP address used to reach this server. By default the plugin uses `private_ip_address` from Forge.
 
 ```
 traefik:upstream-host=10.0.1.10
 ```
+
+Backends are dialed over cleartext HTTP, so the value must be a private
+(`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`) or loopback IP address. A public
+IP or a hostname causes every site on the server to be skipped with a log line.
+The same rule applies to a `serverMappings` `upstreamHost`, and to a server whose
+only Forge address is the public `ip_address` — the plugin does not fall back to it.
 
 Aliases: `traefik:lb-host`, `traefik:loadbalancer-host`
 

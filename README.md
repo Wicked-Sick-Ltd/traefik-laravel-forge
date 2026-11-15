@@ -39,8 +39,14 @@ On each poll the plugin:
 1. Fetches all servers in your Forge organisation
 2. For each server, fetches its sites and their domain records (`/domains`)
 3. Fetches the Reverb WebSocket integration config per site (`/integrations/reverb`)
-4. Auto-detects the server's private IP (falls back to public IP)
+4. Auto-detects the server's private IP
 5. Generates Traefik routers and services for all installed sites
+
+Backends are dialed over cleartext HTTP, so the plugin only publishes a server
+whose upstream is a private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`) or
+loopback IP address. A server with no private IP, or with an `upstream-host` /
+`upstreamHost` override that is a public IP or a hostname, is skipped with a
+log line rather than proxied in the clear across the internet.
 
 Each site produces:
 - A **main router** covering all its primary and alias domains (with `HostRegexp` for wildcard-enabled domains)
@@ -140,6 +146,9 @@ serverMappings:
     upstreamPort: 8080          # override default port 80
 ```
 
+`upstreamHost` must be a private or loopback IP address; a public IP or a hostname
+causes the server to be skipped (see [How it works](#how-it-works)).
+
 Both override fields are optional. Omit `upstreamHost` to override only the port
 and keep the IP address auto-detected from Forge:
 
@@ -194,7 +203,7 @@ Add these to a server in Forge to override how it's addressed:
 
 | Tag | Example | Description |
 |-----|---------|-------------|
-| `traefik:upstream-host` | `traefik:upstream-host=10.0.1.10` | Override the auto-detected server IP |
+| `traefik:upstream-host` | `traefik:upstream-host=10.0.1.10` | Override the auto-detected server IP. Must be a private or loopback IP address |
 | `traefik:upstream-port` | `traefik:upstream-port=8080` | Override the default backend port (80) |
 | `traefik:traefik-id` | `traefik:traefik-id=lb01` | Informational: which Traefik instance handles this server |
 
@@ -308,13 +317,17 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
 - Check `apiToken` and `organization` are correct
 - Ensure sites have status `installed` in Forge
 - Check Traefik logs — the plugin logs every discovery decision to stdout
+- A log line saying the upstream "is not a private or loopback IP address" means the
+  server has no private IP in Forge, or its `upstream-host` / `upstreamHost` override
+  is a public IP or hostname. Put the server on a private network shared with Traefik
+  and point the override at that private IP
 
 **Routes created but traffic not flowing**
 - Verify the server's private IP is reachable from your Traefik host
 - Check that the backend is listening on the expected port
 
 **Wrong IP being used**
-- The plugin prefers `private_ip_address` over `ip_address` from Forge
+- The plugin uses `private_ip_address` from Forge; it never falls back to the public `ip_address`
 - Override with a `traefik:upstream-host=` tag on the server, or a `serverMappings` entry
 
 **Wildcard subdomains not matching**
