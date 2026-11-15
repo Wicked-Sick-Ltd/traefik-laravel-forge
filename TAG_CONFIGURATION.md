@@ -168,8 +168,16 @@ Override the default backend port (80) for all sites on this server. Can be over
 traefik:upstream-port=8080
 ```
 
+The tag does not need `traefik:upstream-host`. It applies to whichever host is
+chosen — the `traefik:upstream-host` tag, a `serverMappings` host, or the
+auto-detected Forge IP — and it outranks a mapping's `upstreamPort`, including
+when the tag sets port 80 explicitly. The full port order is: site `traefik:port`,
+then this tag, then the mapping's `upstreamPort`, then 80. A server with a
+`traefik:upstream-host` tag ignores its mapping entirely, port included.
+
 Validated the same way as `traefik:port` — must be 1–65535, and an invalid value
-falls back to port 80 with a log line rather than being applied.
+is ignored with a log line rather than being applied, so the port falls back to
+the mapping's `upstreamPort` or 80.
 
 Aliases: `traefik:lb-port`, `traefik:loadbalancer-port`
 

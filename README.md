@@ -195,7 +195,7 @@ Add these to a server in Forge to override how it's addressed:
 | Tag | Example | Description |
 |-----|---------|-------------|
 | `traefik:upstream-host` | `traefik:upstream-host=10.0.1.10` | Override the auto-detected server IP |
-| `traefik:upstream-port` | `traefik:upstream-port=8080` | Override the default backend port (80) |
+| `traefik:upstream-port` | `traefik:upstream-port=8080` | Override the backend port (default 80) for every site on this server, whether the host comes from `upstream-host`, a server mapping, or Forge auto-detection |
 | `traefik:traefik-id` | `traefik:traefik-id=lb01` | Informational: which Traefik instance handles this server |
 
 Aliases accepted for backwards compatibility: `lb-host`, `lb-port`, `loadbalancer-host`, `loadbalancer-port`.
