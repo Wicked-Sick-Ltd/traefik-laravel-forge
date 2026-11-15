@@ -79,6 +79,11 @@ traefik:http-redirect=true    # generate HTTP→HTTPS redirect router
 traefik:http-redirect=false   # no redirect router even if httpRedirect is globally true
 ```
 
+The redirect router listens on the `web` entry point and always carries a redirect
+middleware — `redirectMiddleware` if configured, otherwise the plugin's own
+`forge-https-redirect` (created even when `httpRedirect` is globally false). It is
+only generated for TLS sites whose `traefik:entrypoints` tag is unset or includes `web`.
+
 ---
 
 ### `traefik:entrypoints`
@@ -91,6 +96,14 @@ traefik:entrypoints=web,websecure
 ```
 
 When not set, defaults to `websecure` if TLS is enabled, `web` otherwise.
+
+If set and the list does not include `web` (exact match — `websecure` does not count),
+the site gets no HTTP redirect router either, so none of its hostnames are published on
+the `web` entry point. Use this to keep a site on an internal entry point only:
+
+```
+traefik:entrypoints=internal
+```
 
 ---
 
