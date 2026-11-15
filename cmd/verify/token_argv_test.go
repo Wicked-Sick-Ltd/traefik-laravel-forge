@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,10 @@ func TestVerifyEnvironmentTokenIsSentAndNotOnTheCommandLine(t *testing.T) {
 	if !strings.Contains(got.url, "https://forge.laravel.com/api/orgs/"+exampleOrg+"/servers") {
 		t.Fatalf("bearer was sent to %q, want the Forge servers endpoint", got.url)
 	}
+	// /proc is Linux-only. The macOS and Windows Go matrix jobs still check the bearer above.
+	if runtime.GOOS != "linux" {
+		return
+	}
 	if strings.Contains(got.cmdline, tokenPlaceholder) || strings.Contains(got.nobodyCmdline, tokenPlaceholder) {
 		t.Fatal("environment token appeared on the verify process command line")
 	}
@@ -214,15 +219,17 @@ func runAsVerify(t *testing.T, args []string, extraEnv []string) verifyResult {
 				continue
 			}
 			got.auth, got.url = splitRecord(string(body))
-			got.cmdline, got.cmdlineMode = readCmdline(t, cmd.Process.Pid)
-			nobodyCmd, nobodyErr := readProcAsNobody(cmd.Process.Pid, "cmdline")
-			got.nobodyCmdline = nobodyCmd
-			if nobodyErr != nil {
-				got.nobodyCmdErr = nobodyErr.Error()
-			}
-			_, envErr := readProcAsNobody(cmd.Process.Pid, "environ")
-			if envErr != nil {
-				got.nobodyEnvironErr = envErr.Error()
+			if cmdline, mode, ok := readCmdline(t, cmd.Process.Pid); ok {
+				got.cmdline, got.cmdlineMode = cmdline, mode
+				nobodyCmd, nobodyErr := readProcAsNobody(cmd.Process.Pid, "cmdline")
+				got.nobodyCmdline = nobodyCmd
+				if nobodyErr != nil {
+					got.nobodyCmdErr = nobodyErr.Error()
+				}
+				_, envErr := readProcAsNobody(cmd.Process.Pid, "environ")
+				if envErr != nil {
+					got.nobodyEnvironErr = envErr.Error()
+				}
 			}
 			release()
 			select {
@@ -266,8 +273,11 @@ func exitCode(t *testing.T, err error) int {
 	return -1
 }
 
-func readCmdline(t *testing.T, pid int) (string, os.FileMode) {
+func readCmdline(t *testing.T, pid int) (string, os.FileMode, bool) {
 	t.Helper()
+	if runtime.GOOS != "linux" {
+		return "", 0, false
+	}
 	path := fmt.Sprintf("/proc/%d/cmdline", pid)
 	body, err := os.ReadFile(path) //nolint:gosec // path is /proc/<pid>/cmdline for the child this test started
 	if err != nil {
@@ -277,7 +287,7 @@ func readCmdline(t *testing.T, pid int) (string, os.FileMode) {
 	if err != nil {
 		t.Fatalf("stat %s: %v", path, err)
 	}
-	return string(body), info.Mode().Perm()
+	return string(body), info.Mode().Perm(), true
 }
 
 func readProcAsNobody(pid int, name string) (string, error) {
