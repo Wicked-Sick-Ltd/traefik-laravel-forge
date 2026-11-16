@@ -552,6 +552,7 @@ type sitePlan struct {
 	reverb      []hostRoute
 	claims      map[string]bool
 	explicit    map[string]bool // a domain record or alias named the host, exact or not
+	domainNamed map[string]bool // a domain record named the host, exact or not
 	domainExact map[string]bool // exact claim came from a domain record, not an alias
 }
 
@@ -564,6 +565,12 @@ func (s *sitePlan) claim(r hostRoute) {
 			s.explicit = map[string]bool{}
 		}
 		s.explicit[r.host] = true
+		if r.fromDomain {
+			if s.domainNamed == nil {
+				s.domainNamed = map[string]bool{}
+			}
+			s.domainNamed[r.host] = true
+		}
 		if r.fromDomain && r.exact {
 			if s.domainExact == nil {
 				s.domainExact = map[string]bool{}
@@ -645,6 +652,7 @@ func (p *Provider) planSite(
 		backendURL:  fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port),
 		claims:      map[string]bool{},
 		explicit:    map[string]bool{},
+		domainNamed: map[string]bool{},
 		domainExact: map[string]bool{},
 	}
 
@@ -781,7 +789,9 @@ func (p *Provider) resolveHostOwners(plans []sitePlan) map[string]string {
 		}
 		var explicit []int
 		for _, i := range idx {
-			if plans[i].explicit[host] {
+			// An alias, including a case variant, does not count. A domain
+			// record does, even when its spelling is not canonical.
+			if plans[i].domainNamed[host] {
 				explicit = append(explicit, i)
 			}
 		}

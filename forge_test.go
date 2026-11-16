@@ -932,6 +932,34 @@ func TestExplicitNonCanonicalWWWBeatsImpliedRedirect(t *testing.T) {
 	}
 }
 
+func TestCaseVariantAliasDoesNotCaptureImpliedWWW(t *testing.T) {
+	alias := installedSite("z", "other.example.com")
+	alias.Attributes.Tags = []string{"traefik:aliases=WWW.example.com"}
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("apex", "example.com"), alias},
+		},
+		domains: map[string][]ForgeDomain{
+			"apex": {domainRecord("example.com", "to-www")},
+			"z":    {domainRecord("other.example.com", "")},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ruleHas(routerRule(cfg, "forge-apex-example.com"), "www.example.com") {
+		t.Fatal("apex lost its implied www host to a case-variant alias")
+	}
+	if ruleHas(routerRule(cfg, "forge-z-other.example.com"), "www.example.com") {
+		t.Fatal("case-variant alias captured the implied www host")
+	}
+}
+
 func TestDomainRecordBeatsLowerAlias(t *testing.T) {
 	alias := installedSite("a", "other.example.com")
 	alias.Attributes.Tags = []string{"traefik:aliases=shop.example.com"}
