@@ -1,6 +1,6 @@
 # traefik-laravel-forge
 
-A [Traefik](https://traefik.io) provider plugin that automatically generates HTTP routers from your [Laravel Forge](https://forge.laravel.com) sites. Add a site to Forge and it appears in Traefik within 30 seconds — no config file edits, no restarts.
+A [Traefik](https://traefik.io) provider plugin that automatically generates HTTP routers from your [Laravel Forge](https://forge.laravel.com) sites. Add a site to Forge and it appears in Traefik within 30 seconds — no config file edits, no restarts. Removing a domain record, moving it to another site, or deleting a site takes effect on the same next poll; the one exception is a poll where Forge refuses the request, covered under [Troubleshooting](#troubleshooting).
 
 **Docs:** [Tag Configuration](TAG_CONFIGURATION.md) · [Migrating from static config](MIGRATION_FROM_STATIC.md)
 
@@ -41,6 +41,8 @@ On each poll the plugin:
 3. Fetches the Reverb WebSocket integration config per site (`/integrations/reverb`)
 4. Auto-detects the server's private IP (falls back to public IP)
 5. Generates Traefik routers and services for all installed sites
+
+Domain records and the Reverb integration are fetched fresh on every poll, never served from a stored copy while Forge is answering.
 
 Each site produces:
 - A **main router** covering all its primary and alias domains (with `HostRegexp` for wildcard-enabled domains)
@@ -122,6 +124,7 @@ That's all that's needed. The plugin discovers your servers and sites automatica
 | `apiToken` | string | **required** | Forge API token — generate at forge.laravel.com/user/profile#/api. Use `${ENV_VAR}` to avoid storing in plain text |
 | `organization` | string | **required** | Forge organisation slug — from the URL: `forge.laravel.com/orgs/{slug}`. Can also use `${ENV_VAR}` |
 | `pollInterval` | string | `"30s"` | How often to poll Forge. Minimum `"10s"`. See [API rate limits](#api-rate-limits) before reducing this |
+| `cacheTTL` | string | `"10m"` | Any positive duration keeps each site's last good domain records and Reverb host, used only when Forge refuses that site's fetch. It never delays a change: every poll asks Forge again. `"0s"` turns the fallback off, so a refused `/domains` fetch abandons the poll instead |
 | `defaultCertResolver` | string | `""` | Cert resolver name to use for all sites. Enables TLS when set |
 | `defaultSitesEnabled` | bool | `true` | Set to `false` for opt-in mode: only sites with `traefik:enabled` tag are routed |
 | `httpRedirect` | bool | `false` | Generate HTTP→HTTPS redirect routers for all sites |
@@ -348,6 +351,13 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
   live sites offline.
 - The log line to look for is `forge: error generating configuration (keeping previous config)`.
 - Routing only changes once a poll completes successfully end to end.
+- When Forge refuses one site's `/domains` request (401, 403, 429 or 5xx), that
+  site keeps the domain records Forge last returned for it, and the log shows
+  `forge: domains fetch failed for site ... reusing its records from ... ago`. That
+  is the same routing the previous poll published, so a domain record removed in
+  Forge stays routed until Forge answers that site's request again — then it is
+  dropped on that poll. A site that stops being routed (disabled, deleted, or
+  skipped) loses its stored records, so it can never come back on old ones.
 
 **A `traefik:port` or `traefik:upstream-port` tag is being ignored**
 - Values must be whole numbers in the range 1–65535. Anything else (`-1`, `80x`,

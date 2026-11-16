@@ -1,6 +1,6 @@
 # Tag Configuration
 
-Forge tags let you control routing behaviour per-site and per-server without editing config files. Changes apply on the next poll (default: 30 seconds).
+Forge tags let you control routing behaviour per-site and per-server without editing config files. Changes apply on the next poll (default: 30 seconds). The same holds for domain records and the Reverb integration, which are read fresh from Forge on every poll.
 
 ## Format
 
