@@ -652,18 +652,20 @@ func TestResolveUpstream(t *testing.T) {
 // catalogForge serves one server and whatever sites, domains and Reverb
 // records the test put on it.
 type catalogForge struct {
-	server  ForgeServer
-	sites   []ForgeSite
+	servers []ForgeServer
+	sites   map[string][]ForgeSite
 	domains map[string][]ForgeDomain
 	reverb  map[string]*ForgeReverbIntegration
 }
 
-func (c catalogForge) FetchServers() ([]ForgeServer, error)   { return []ForgeServer{c.server}, nil }
-func (c catalogForge) FetchSites(string) ([]ForgeSite, error) { return c.sites, nil }
-func (c catalogForge) FetchDomains(_, siteID string) ([]ForgeDomain, error) {
+func (c *catalogForge) FetchServers() ([]ForgeServer, error) { return c.servers, nil }
+func (c *catalogForge) FetchSites(serverID string) ([]ForgeSite, error) {
+	return c.sites[serverID], nil
+}
+func (c *catalogForge) FetchDomains(_, siteID string) ([]ForgeDomain, error) {
 	return c.domains[siteID], nil
 }
-func (c catalogForge) FetchReverbIntegration(_, siteID string) (*ForgeReverbIntegration, error) {
+func (c *catalogForge) FetchReverbIntegration(_, siteID string) (*ForgeReverbIntegration, error) {
 	return c.reverb[siteID], nil
 }
 
@@ -680,44 +682,53 @@ func routingProvider(t *testing.T, client ForgeClient) *Provider {
 }
 
 func enabledDomain(name string) ForgeDomain {
-	return ForgeDomain{
-		ID:   name,
-		Type: "domainRecords",
-		Attributes: ForgeDomainAttributes{
-			Name:   name,
-			Status: "enabled",
-		},
+	domain := ForgeDomain{ID: name}
+	domain.Type = "domainRecords"
+	domain.Attributes.Name = name
+	domain.Attributes.Status = statusEnabled
+	return domain
+}
+
+func namedSite(id, name string, tags []string) ForgeSite {
+	site := ForgeSite{ID: id}
+	site.Type = "sites"
+	site.Attributes.Name = name
+	site.Attributes.Status = statusInstalled
+	site.Attributes.Tags = tags
+	return site
+}
+
+func newCatalog(server ForgeServer, sites []ForgeSite, domains map[string][]ForgeDomain, reverb map[string]*ForgeReverbIntegration) *catalogForge {
+	c := &catalogForge{}
+	c.servers = append(c.servers, server)
+	c.sites = map[string][]ForgeSite{}
+	c.sites[server.ID] = sites
+	if domains == nil {
+		domains = map[string][]ForgeDomain{}
 	}
+	c.domains = domains
+	if reverb == nil {
+		reverb = map[string]*ForgeReverbIntegration{}
+	}
+	c.reverb = reverb
+	return c
 }
 
 // TestOnForgeFilterDoesNotPublishSiteName pins the site-name fallback to sites
 // that have no main domain records, and keeps a Reverb router when the only
 // main record is a Forge default name.
 func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
-	server := ForgeServer{
-		ID:   "s1",
-		Type: "servers",
-		Attributes: ForgeServerAttributes{
-			Name:             "app01",
-			PrivateIPAddress: "10.0.0.1",
-		},
-	}
+	server := ForgeServer{ID: "s1"}
+	server.Type = "servers"
+	server.Attributes.Name = "app01"
+	server.Attributes.PrivateIPAddress = "10.0.0.1"
 
 	t.Run("on-forge plus reverb publishes only the reverb host", func(t *testing.T) {
-		p := routingProvider(t, catalogForge{
-			server: server,
-			sites: []ForgeSite{{
-				ID:         "site1",
-				Type:       "sites",
-				Attributes: ForgeSiteAttributes{Name: "example.com", Status: "installed"},
-			}},
-			domains: map[string][]ForgeDomain{
-				"site1": {enabledDomain("app.on-forge.com"), enabledDomain("ws.example.com")},
-			},
-			reverb: map[string]*ForgeReverbIntegration{
-				"site1": {Enabled: true, Host: "ws.example.com"},
-			},
-		})
+		sites := append([]ForgeSite{}, namedSite("site1", "example.com", nil))
+		domains := map[string][]ForgeDomain{}
+		domains["site1"] = append(domains["site1"], enabledDomain("app.on-forge.com"), enabledDomain("ws.example.com"))
+		reverb := map[string]*ForgeReverbIntegration{"site1": {Enabled: true, Host: "ws.example.com"}}
+		p := routingProvider(t, newCatalog(server, sites, domains, reverb))
 		cfg, err := p.GenerateConfiguration()
 		if err != nil {
 			t.Fatal(err)
@@ -728,12 +739,12 @@ func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
 		if cfg.HTTP.Routers["forge-site1-app.on-forge.com"] != nil {
 			t.Fatal(".on-forge.com router was published")
 		}
-		reverb := cfg.HTTP.Routers["forge-site1-ws.example.com"]
-		if reverb == nil {
+		reverbRouter := cfg.HTTP.Routers["forge-site1-ws.example.com"]
+		if reverbRouter == nil {
 			t.Fatal("reverb router was not published")
 		}
-		if reverb.Priority != domainPriority("ws.example.com")+1 {
-			t.Errorf("reverb priority = %d, want %d", reverb.Priority, domainPriority("ws.example.com")+1)
+		if reverbRouter.Priority != domainPriority("ws.example.com")+1 {
+			t.Errorf("reverb priority = %d, want %d", reverbRouter.Priority, domainPriority("ws.example.com")+1)
 		}
 		if cfg.HTTP.Services["forge-example.com-site1-service"] == nil {
 			t.Fatal("service was not created for the reverb-only site")
@@ -741,16 +752,8 @@ func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
 	})
 
 	t.Run("no domain records falls back to the site name", func(t *testing.T) {
-		p := routingProvider(t, catalogForge{
-			server: server,
-			sites: []ForgeSite{{
-				ID:         "site1",
-				Type:       "sites",
-				Attributes: ForgeSiteAttributes{Name: "example.com", Status: "installed"},
-			}},
-			domains: map[string][]ForgeDomain{},
-			reverb:  map[string]*ForgeReverbIntegration{},
-		})
+		sites := append([]ForgeSite{}, namedSite("site1", "example.com", nil))
+		p := routingProvider(t, newCatalog(server, sites, nil, nil))
 		cfg, err := p.GenerateConfiguration()
 		if err != nil {
 			t.Fatal(err)
@@ -764,39 +767,19 @@ func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
 // TestReverbRouterOutranksPeerAlias checks that the owning site's Reverb
 // router beats another site's router for the same hostname.
 func TestReverbRouterOutranksPeerAlias(t *testing.T) {
-	p := routingProvider(t, catalogForge{
-		server: ForgeServer{
-			ID:   "s1",
-			Type: "servers",
-			Attributes: ForgeServerAttributes{
-				Name:             "app01",
-				PrivateIPAddress: "10.0.0.1",
-			},
-		},
-		sites: []ForgeSite{
-			{
-				ID:         "owner",
-				Type:       "sites",
-				Attributes: ForgeSiteAttributes{Name: "shop.example.com", Status: "installed"},
-			},
-			{
-				ID:   "peer",
-				Type: "sites",
-				Attributes: ForgeSiteAttributes{
-					Name:   "other.example.com",
-					Status: "installed",
-					Tags:   []string{"traefik:aliases=ws.example.com"},
-				},
-			},
-		},
-		domains: map[string][]ForgeDomain{
-			"owner": {enabledDomain("shop.example.com"), enabledDomain("ws.example.com")},
-			"peer":  {enabledDomain("other.example.com")},
-		},
-		reverb: map[string]*ForgeReverbIntegration{
-			"owner": {Enabled: true, Host: "ws.example.com"},
-		},
-	})
+	server := ForgeServer{ID: "s1"}
+	server.Type = "servers"
+	server.Attributes.Name = "app01"
+	server.Attributes.PrivateIPAddress = "10.0.0.1"
+	sites := append([]ForgeSite{},
+		namedSite("owner", "shop.example.com", nil),
+		namedSite("peer", "other.example.com", []string{"traefik:aliases=ws.example.com"}),
+	)
+	domains := map[string][]ForgeDomain{}
+	domains["owner"] = append(domains["owner"], enabledDomain("shop.example.com"), enabledDomain("ws.example.com"))
+	domains["peer"] = append(domains["peer"], enabledDomain("other.example.com"))
+	reverb := map[string]*ForgeReverbIntegration{"owner": {Enabled: true, Host: "ws.example.com"}}
+	p := routingProvider(t, newCatalog(server, sites, domains, reverb))
 	cfg, err := p.GenerateConfiguration()
 	if err != nil {
 		t.Fatal(err)
