@@ -203,9 +203,9 @@ A canonical hostname is routed to one site only:
 1. If only one site asks for it, that site gets it.
 2. If several sites ask for it, the site that served it after the previous poll keeps it.
 3. Otherwise, if exactly one of those sites spells it in canonical form in Forge, that site gets it.
-4. Otherwise, if several sites spell it exactly, the one with the lowest `server/site` key gets it. That choice is remembered, so later polls keep it. A tie in which nobody spelled it exactly goes to no site, so a case or trailing-dot variant cannot capture the name.
+4. Otherwise, if several sites spell it exactly, a Forge domain record beats an alias-only claim. Among the remaining sites, the one with the lowest `server/site` key gets it. That choice is remembered, so later polls keep it. A tie in which nobody spelled it exactly goes to no site, so a case or trailing-dot variant cannot capture the name. An implied `www.` host that nobody claimed exactly follows the site that won the apex.
 
-Each conflict is logged on every poll as `forge: host "..." is requested by sites ...`. An implied `www.` host from a www redirect is a weaker claim than an explicit `www.` record or alias, so the explicit one wins. A site that loses its apex still serves a `www.` host nobody else asked for, and a Reverb host the site alone owns is still published when the site loses its other names. A hostname that another site already serves cannot be taken over by adding it as an alias or domain on a second site; remove it from the first site and the second site picks it up on the next poll.
+Each conflict is logged on every poll as `forge: host "..." is requested by sites ...`. An implied `www.` host from a www redirect is a weaker claim than an explicit `www.` record, so the explicit one wins. A site that loses its apex still serves a `www.` host nobody else asked for, and a Reverb host the site alone owns is still published when the site loses its other names. While the plugin keeps running, a hostname another site already serves cannot be taken by an alias. After a restart, an alias still cannot beat a domain record; two domain records for the same name are the exact-tie case above.
 
 ### .on-forge.com domains
 

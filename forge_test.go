@@ -879,6 +879,61 @@ func TestReverbSurvivesLossOfMainHost(t *testing.T) {
 	}
 }
 
+func TestExactApexTieKeepsWWWWithTheApex(t *testing.T) {
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("b", "example.com"), installedSite("a", "example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"a": {domainRecord("example.com", "to-www")},
+			"b": {domainRecord("example.com", "to-www")},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := routerRule(cfg, "forge-a-example.com")
+	if !ruleHas(rule, "example.com") || !ruleHas(rule, "www.example.com") {
+		t.Fatalf("apex winner rule = %q", rule)
+	}
+	if routerRule(cfg, "forge-b-example.com") != "" {
+		t.Fatal("losing site still published the apex or www host")
+	}
+}
+
+func TestDomainRecordBeatsLowerAlias(t *testing.T) {
+	alias := installedSite("a", "other.example.com")
+	alias.Attributes.Tags = []string{"traefik:aliases=shop.example.com"}
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {alias, installedSite("b", "shop.example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"a": {domainRecord("other.example.com", "")},
+			"b": {domainRecord("shop.example.com", "")},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ruleHas(routerRule(cfg, "forge-b-shop.example.com"), "shop.example.com") {
+		t.Fatal("domain record lost the hostname to an alias")
+	}
+	if ruleHas(routerRule(cfg, "forge-a-other.example.com"), "shop.example.com") {
+		t.Fatal("alias captured a hostname that has a domain record")
+	}
+}
+
 func TestStopIsSafeAndIdempotent(t *testing.T) {
 	p, err := NewProviderWithClient(&Config{PollInterval: "30s"}, stubClient{})
 	if err != nil {

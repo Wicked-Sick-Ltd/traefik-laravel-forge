@@ -535,6 +535,7 @@ type hostRoute struct {
 	wwwHost      string
 	wildcard     bool
 	exact        bool // the Forge name or tag already was the canonical spelling
+	fromDomain   bool // a Forge domain record, not a traefik:aliases entry
 	tags         siteTagConfig
 	enableTLS    bool
 	certResolver string
@@ -550,6 +551,7 @@ type sitePlan struct {
 	routes      []hostRoute
 	reverb      []hostRoute
 	claims      map[string]bool
+	domainExact map[string]bool // exact claim came from a domain record, not an alias
 }
 
 func (s *sitePlan) claim(r hostRoute) {
@@ -557,6 +559,12 @@ func (s *sitePlan) claim(r hostRoute) {
 		// An explicit record or alias can upgrade a weaker claim. It must not
 		// downgrade one that was already exact.
 		s.claims[r.host] = s.claims[r.host] || r.exact
+		if r.fromDomain && r.exact {
+			if s.domainExact == nil {
+				s.domainExact = map[string]bool{}
+			}
+			s.domainExact[r.host] = true
+		}
 	}
 	if r.wwwHost != "" {
 		// A www host implied by a redirect is not an exact claim. An explicit
@@ -631,6 +639,7 @@ func (p *Provider) planSite(
 		serviceName: fmt.Sprintf("forge-%s-%s-service", site.Attributes.Name, site.ID),
 		backendURL:  fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port),
 		claims:      map[string]bool{},
+		domainExact: map[string]bool{},
 	}
 
 	// One router per Forge domain record.
@@ -695,6 +704,7 @@ func domainRoute(siteID string, domain ForgeDomain, tags siteTagConfig) (hostRou
 		routerName:   routerNameFor(siteID, host),
 		host:         host,
 		exact:        name == host,
+		fromDomain:   true,
 		tags:         tags,
 		enableTLS:    tags.EnableTLS,
 		certResolver: tags.CertResolver,
@@ -755,6 +765,27 @@ func (p *Provider) resolveHostOwners(plans []sitePlan) map[string]string {
 			owners[host] = owner
 		}
 	}
+	// An implied www host follows the site that won its apex, unless an
+	// explicit www record already took it. Otherwise two exact apexes with
+	// www redirects leave www unpublished.
+	for host, idx := range claimants {
+		if _, ok := owners[host]; ok || !strings.HasPrefix(host, "www.") {
+			continue
+		}
+		apexOwner, ok := owners[strings.TrimPrefix(host, "www.")]
+		if !ok {
+			continue
+		}
+		for _, i := range idx {
+			if plans[i].key != apexOwner {
+				continue
+			}
+			owners[host] = apexOwner
+			fmt.Fprintf(os.Stderr, "forge: host %q follows apex owner site %q\n",
+				host, plans[i].name)
+			break
+		}
+	}
 	return owners
 }
 
@@ -782,8 +813,20 @@ func pickHostOwner(host string, idx []int, plans []sitePlan, incumbent string) (
 		return plans[exact[0]].key, true
 	}
 	if len(exact) > 1 {
-		winner := exact[0]
-		for _, i := range exact[1:] {
+		// A Forge domain record beats an alias-only claim, so adding an alias
+		// cannot take a name a domain record already spells exactly.
+		pool := exact
+		var fromDomain []int
+		for _, i := range exact {
+			if plans[i].domainExact[host] {
+				fromDomain = append(fromDomain, i)
+			}
+		}
+		if len(fromDomain) > 0 && len(fromDomain) < len(exact) {
+			pool = fromDomain
+		}
+		winner := pool[0]
+		for _, i := range pool[1:] {
 			if plans[i].key < plans[winner].key {
 				winner = i
 			}
