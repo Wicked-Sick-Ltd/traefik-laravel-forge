@@ -13,11 +13,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
 
 	forge "github.com/Wicked-Sick-Ltd/traefik-laravel-forge"
+	"github.com/traefik/genconf/dynamic"
 )
 
 func main() {
@@ -96,21 +98,13 @@ func main() {
 
 	fmt.Printf("Generated %d routers, %d services\n\n", len(generated.HTTP.Routers), len(generated.HTTP.Services))
 
-	// Collect generated hosts for comparison
-	generatedHosts := make(map[string]routerInfo)
-
 	fmt.Printf("%-44s %-15s %-20s %s\n", "ROUTER", "ENTRY POINTS", "SERVICE -> BACKEND", "RULE")
 	fmt.Println(strings.Repeat("-", 120))
 
 	for _, name := range routerNames {
 		r := generated.HTTP.Routers[name]
 		eps := strings.Join(r.EntryPoints, ",")
-		svc := r.Service
-
-		backend := ""
-		if s, ok := generated.HTTP.Services[svc]; ok && s.LoadBalancer != nil && len(s.LoadBalancer.Servers) > 0 {
-			backend = s.LoadBalancer.Servers[0].URL
-		}
+		backend := routerBackend(generated, r)
 
 		tlsMark := ""
 		if r.TLS != nil {
@@ -122,12 +116,6 @@ func main() {
 		}
 
 		fmt.Printf("%-44s %-15s %-20s %s%s\n", name, eps, backend+tlsMark, r.Rule, "")
-
-		// Collect every host the rule matches, so --compare does not report the
-		// www./wildcard variants of a multi-host rule as missing.
-		for _, host := range extractHosts(r.Rule) {
-			generatedHosts[host] = routerInfo{name: name, backend: backend, tls: r.TLS != nil}
-		}
 	}
 
 	// Compare against existing config if provided
@@ -143,66 +131,9 @@ func main() {
 			os.Exit(1)
 		}
 
-		fmt.Printf("\nExisting config has %d Host() rules\n", len(existingHosts))
-		fmt.Printf("Generated config has %d Host() rules\n\n", len(generatedHosts))
-
-		// In existing but NOT in generated
-		missing := []string{}
-		for host := range existingHosts {
-			if _, found := generatedHosts[host]; !found {
-				missing = append(missing, host)
-			}
-		}
-		sort.Strings(missing)
-
-		if len(missing) > 0 {
-			fmt.Printf("MISSING from generated (in your config but not in Forge):\n")
-			for _, h := range missing {
-				fmt.Printf("  - %s\n", h)
-			}
-			fmt.Println()
-		} else {
-			fmt.Println("OK: All hosts from your existing config are covered by the generated config.")
-			fmt.Println()
-		}
-
-		// In generated but NOT in existing
-		extra := []string{}
-		for host := range generatedHosts {
-			if _, found := existingHosts[host]; !found {
-				extra = append(extra, host)
-			}
-		}
-		sort.Strings(extra)
-
-		if len(extra) > 0 {
-			fmt.Printf("NEW in generated (Forge sites not in your existing config):\n")
-			for _, h := range extra {
-				info := generatedHosts[h]
-				tlsMark := ""
-				if info.tls {
-					tlsMark = " [TLS]"
-				}
-				fmt.Printf("  + %s -> %s%s\n", h, info.backend, tlsMark)
-			}
-			fmt.Println()
-		}
-
-		// Matched hosts
-		matched := []string{}
-		for host := range generatedHosts {
-			if _, found := existingHosts[host]; found {
-				matched = append(matched, host)
-			}
-		}
-		sort.Strings(matched)
-
-		if len(matched) > 0 {
-			fmt.Printf("MATCHED (%d hosts in both configs):\n", len(matched))
-			for _, h := range matched {
-				fmt.Printf("  = %s\n", h)
-			}
-			fmt.Println()
+		if err := compare(os.Stdout, generated, existingHosts); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
 		}
 	}
 }
@@ -211,6 +142,98 @@ type routerInfo struct {
 	name    string
 	backend string
 	tls     bool
+}
+
+// routerBackend returns the first load-balancer URL behind a router's service.
+func routerBackend(generated *dynamic.Configuration, r *dynamic.Router) string {
+	if s, ok := generated.HTTP.Services[r.Service]; ok && s.LoadBalancer != nil && len(s.LoadBalancer.Servers) > 0 {
+		return s.LoadBalancer.Servers[0].URL
+	}
+	return ""
+}
+
+// compare writes the MISSING / NEW / MATCHED summary of the generated routers
+// against the hosts found in an existing static config.
+func compare(w io.Writer, generated *dynamic.Configuration, existingHosts map[string]bool) error {
+	routerNames := make([]string, 0, len(generated.HTTP.Routers))
+	for name := range generated.HTTP.Routers {
+		routerNames = append(routerNames, name)
+	}
+	sort.Strings(routerNames)
+
+	generatedHosts := make(map[string]routerInfo)
+	for _, name := range routerNames {
+		r := generated.HTTP.Routers[name]
+		// Collect every host the rule matches, so --compare does not report the
+		// www./wildcard variants of a multi-host rule as missing.
+		for _, host := range extractHosts(r.Rule) {
+			generatedHosts[host] = routerInfo{name: name, backend: routerBackend(generated, r), tls: r.TLS != nil}
+		}
+	}
+
+	_, _ = fmt.Fprintf(w, "\nExisting config has %d Host() rules\n", len(existingHosts))
+	_, _ = fmt.Fprintf(w, "Generated config has %d Host() rules\n\n", len(generatedHosts))
+
+	// In existing but NOT in generated
+	missing := []string{}
+	for host := range existingHosts {
+		if _, found := generatedHosts[host]; !found {
+			missing = append(missing, host)
+		}
+	}
+	sort.Strings(missing)
+
+	if len(missing) > 0 {
+		_, _ = fmt.Fprintf(w, "MISSING from generated (in your config but not in Forge):\n")
+		for _, h := range missing {
+			_, _ = fmt.Fprintf(w, "  - %s\n", h)
+		}
+		_, _ = fmt.Fprintln(w)
+	} else {
+		_, _ = fmt.Fprintln(w, "OK: All hosts from your existing config are covered by the generated config.")
+		_, _ = fmt.Fprintln(w)
+	}
+
+	// In generated but NOT in existing
+	extra := []string{}
+	for host := range generatedHosts {
+		if _, found := existingHosts[host]; !found {
+			extra = append(extra, host)
+		}
+	}
+	sort.Strings(extra)
+
+	if len(extra) > 0 {
+		_, _ = fmt.Fprintf(w, "NEW in generated (Forge sites not in your existing config):\n")
+		for _, h := range extra {
+			info := generatedHosts[h]
+			tlsMark := ""
+			if info.tls {
+				tlsMark = " [TLS]"
+			}
+			_, _ = fmt.Fprintf(w, "  + %s -> %s%s\n", h, info.backend, tlsMark)
+		}
+		_, _ = fmt.Fprintln(w)
+	}
+
+	// Matched hosts
+	matched := []string{}
+	for host := range generatedHosts {
+		if _, found := existingHosts[host]; found {
+			matched = append(matched, host)
+		}
+	}
+	sort.Strings(matched)
+
+	if len(matched) > 0 {
+		_, _ = fmt.Fprintf(w, "MATCHED (%d hosts in both configs):\n", len(matched))
+		for _, h := range matched {
+			_, _ = fmt.Fprintf(w, "  = %s\n", h)
+		}
+		_, _ = fmt.Fprintln(w)
+	}
+
+	return nil
 }
 
 // extractHosts pulls every hostname out of a Traefik rule fragment. A rule may
