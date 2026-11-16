@@ -698,6 +698,14 @@ func namedSite(id, name string, tags []string) ForgeSite {
 	return site
 }
 
+func appServer() ForgeServer {
+	server := ForgeServer{ID: "s1"}
+	server.Type = "servers"
+	server.Attributes.Name = "app01"
+	server.Attributes.PrivateIPAddress = "10.0.0.1"
+	return server
+}
+
 func newCatalog(server ForgeServer, sites []ForgeSite, domains map[string][]ForgeDomain, reverb map[string]*ForgeReverbIntegration) *catalogForge {
 	c := &catalogForge{}
 	c.servers = append(c.servers, server)
@@ -718,10 +726,7 @@ func newCatalog(server ForgeServer, sites []ForgeSite, domains map[string][]Forg
 // that have no main domain records, and keeps a Reverb router when the only
 // main record is a Forge default name.
 func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
-	server := ForgeServer{ID: "s1"}
-	server.Type = "servers"
-	server.Attributes.Name = "app01"
-	server.Attributes.PrivateIPAddress = "10.0.0.1"
+	server := appServer()
 
 	t.Run("on-forge plus reverb publishes only the reverb host", func(t *testing.T) {
 		sites := append([]ForgeSite{}, namedSite("site1", "example.com", nil))
@@ -767,11 +772,8 @@ func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
 // TestContestedHostIsPublishedOnNoSite drops a hostname that two sites both
 // publish, including a Reverb host another site also aliases. Neither router
 // keeps the name, so a Reverb record cannot capture someone else's host.
-func TestContestedHostIsPublishedOnNoSite(t *testing.T) {
-	server := ForgeServer{ID: "s1"}
-	server.Type = "servers"
-	server.Attributes.Name = "app01"
-	server.Attributes.PrivateIPAddress = "10.0.0.1"
+func TestContestedHostStaysWithLowestSiteID(t *testing.T) {
+	server := appServer()
 	sites := append([]ForgeSite{},
 		namedSite("owner", "shop.example.com", nil),
 		namedSite("peer", "other.example.com", []string{"traefik:aliases=ws.example.com"}),
@@ -785,11 +787,75 @@ func TestContestedHostIsPublishedOnNoSite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTP.Routers["forge-owner-ws.example.com"] != nil || cfg.HTTP.Routers["forge-peer-ws.example.com"] != nil {
-		t.Fatal("contested host was still published")
+	if cfg.HTTP.Routers["forge-owner-ws.example.com"] == nil {
+		t.Fatal("lowest site id lost the contested host")
+	}
+	if cfg.HTTP.Routers["forge-peer-ws.example.com"] != nil {
+		t.Fatal("higher site id still published the contested host")
 	}
 	if cfg.HTTP.Routers["forge-owner-shop.example.com"] == nil || cfg.HTTP.Routers["forge-peer-other.example.com"] == nil {
 		t.Fatal("uncontested hosts were dropped with the contested one")
+	}
+}
+
+func TestSameSiteWWWAliasIsNotAContest(t *testing.T) {
+	server := appServer()
+	domain := enabledDomain("example.com")
+	domain.Attributes.WWWRedirectType = "to-www"
+	site := namedSite("site1", "example.com", []string{"traefik:aliases=www.example.com"})
+	domains := map[string][]ForgeDomain{}
+	domains["site1"] = append(domains["site1"], domain)
+	p := routingProvider(t, newCatalog(server, []ForgeSite{site}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	apex := cfg.HTTP.Routers["forge-site1-example.com"]
+	alias := cfg.HTTP.Routers["forge-site1-www.example.com"]
+	if apex == nil || alias == nil {
+		t.Fatalf("apex=%v alias=%v", apex != nil, alias != nil)
+	}
+	if !strings.Contains(apex.Rule, "Host(`www.example.com`)") || !strings.Contains(alias.Rule, "Host(`www.example.com`)") {
+		t.Fatalf("www was treated as a contest: apex=%s alias=%s", apex.Rule, alias.Rule)
+	}
+}
+
+func TestDisjointEntrypointsAreNotAContest(t *testing.T) {
+	server := appServer()
+	web := namedSite("a", "shop.example.com", []string{"traefik:entrypoints=web", "traefik:tls=false"})
+	secure := namedSite("b", "shop.example.com", []string{"traefik:entrypoints=websecure", "traefik:tls=true"})
+	domains := map[string][]ForgeDomain{}
+	domains["a"] = append(domains["a"], enabledDomain("shop.example.com"))
+	domains["b"] = append(domains["b"], enabledDomain("shop.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{web, secure}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-a-shop.example.com"] == nil || cfg.HTTP.Routers["forge-b-shop.example.com"] == nil {
+		t.Fatal("disjoint entry points were treated as one contest")
+	}
+}
+
+func TestAliasRuleInjectionIsIgnored(t *testing.T) {
+	server := appServer()
+	owner := namedSite("owner", "shop.example.com", nil)
+	peer := namedSite("peer", "other.example.com", []string{"traefik:aliases=shop.example.com`) && PathPrefix(`/admin"})
+	domains := map[string][]ForgeDomain{}
+	domains["owner"] = append(domains["owner"], enabledDomain("shop.example.com"))
+	domains["peer"] = append(domains["peer"], enabledDomain("other.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{owner, peer}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-owner-shop.example.com"] == nil {
+		t.Fatal("owner router was removed because of an alias that is not a hostname")
+	}
+	for name := range cfg.HTTP.Routers {
+		if strings.Contains(name, "PathPrefix") || strings.Contains(cfg.HTTP.Routers[name].Rule, "PathPrefix") {
+			t.Fatalf("injected rule was published: %s %s", name, cfg.HTTP.Routers[name].Rule)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -582,6 +583,11 @@ func (p *Provider) processSite(
 
 	// traefik:aliases → one router per alias, skipping any already covered by a domain record.
 	for _, alias := range tags.Aliases {
+		if !plainHostname(alias) {
+			pluginLog.Printf("Ignoring traefik:aliases entry %q on site %q: not a plain hostname",
+				alias, site.Attributes.Name)
+			continue
+		}
 		routerName := fmt.Sprintf("forge-%s-%s", site.ID, alias)
 		if _, exists := configuration.HTTP.Routers[routerName]; !exists {
 			createRouter(routerName, fmt.Sprintf("Host(`%s`)", alias), serviceName, tags,
@@ -911,41 +917,79 @@ func domainPriority(domain string) int {
 	return (strings.Count(domain, ".") + 1) * 100
 }
 
-// dropContestedHosts removes a hostname from every router when more than one
-// site published it. A priority bump would let a Reverb record capture another
-// site's real name; leaving the tie would let router order decide. The host
-// stays unpublished until only one site asks for it.
+// hostClaim is one site's exact Host() on one router.
+type hostClaim struct {
+	siteID string
+	router string
+	eps    []string
+}
+
+// dropContestedHosts leaves one site publishing a hostname when several sites
+// ask for it on a shared entry point. The lowest site id keeps it and the
+// others lose that literal. A site's own second router is not a contest, and
+// routers on disjoint entry points are not either. Only a rule part that is
+// exactly Host(`name`) counts, so a value that smuggles extra rule syntax is
+// not treated as a claim of that name.
 func dropContestedHosts(configuration *dynamic.Configuration) {
 	if configuration == nil || configuration.HTTP == nil {
 		return
 	}
-	users := map[string][]string{}
+	claims := map[string][]hostClaim{}
+	siteOf := map[string]string{}
 	for name, router := range configuration.HTTP.Routers {
 		if strings.HasSuffix(name, "-http") || router == nil {
 			continue
 		}
-		for _, host := range hostLiterals(router.Rule) {
-			users[host] = append(users[host], name)
+		siteID := siteIDFromRouter(name, router.Rule)
+		siteOf[name] = siteID
+		for _, host := range exactHosts(router.Rule) {
+			claims[host] = append(claims[host], hostClaim{
+				siteID: siteID,
+				router: name,
+				eps:    router.EntryPoints,
+			})
 		}
 	}
-	contested := map[string]bool{}
-	for host, names := range users {
-		if len(names) < 2 {
+	// drop[router] is the set of hosts to remove from that router.
+	drop := map[string]map[string]bool{}
+	for host, list := range claims {
+		losers := losingSites(list)
+		if len(losers) == 0 {
 			continue
 		}
-		contested[host] = true
-		sort.Strings(names)
-		pluginLog.Printf("Host %q is claimed by routers %s; publishing it on none of them",
-			host, strings.Join(names, ", "))
+		var kept, lost []string
+		for _, c := range list {
+			if losers[c.siteID] {
+				lost = append(lost, c.siteID)
+				if drop[c.router] == nil {
+					drop[c.router] = map[string]bool{}
+				}
+				drop[c.router][host] = true
+				continue
+			}
+			kept = append(kept, c.siteID)
+		}
+		sort.Strings(lost)
+		sort.Strings(kept)
+		pluginLog.Printf("Host %q stays with site %s; not publishing it for %s",
+			host, strings.Join(uniqueStrings(kept), ", "), strings.Join(uniqueStrings(lost), ", "))
 	}
-	if len(contested) == 0 {
+	if len(drop) == 0 {
 		return
 	}
 	for name, router := range configuration.HTTP.Routers {
 		if router == nil {
 			continue
 		}
-		rule, changed := ruleWithoutHosts(router.Rule, contested)
+		base := name
+		if rest, ok := strings.CutSuffix(name, "-http"); ok {
+			base = rest
+		}
+		hosts := drop[base]
+		if len(hosts) == 0 {
+			continue
+		}
+		rule, changed := ruleWithoutHosts(router.Rule, hosts)
 		if !changed {
 			continue
 		}
@@ -957,23 +1001,137 @@ func dropContestedHosts(configuration *dynamic.Configuration) {
 	}
 }
 
-func hostLiterals(rule string) []string {
-	var hosts []string
-	rest := rule
-	const marker = "Host(`"
-	for {
-		i := strings.Index(rest, marker)
-		if i < 0 {
-			return hosts
+func losingSites(list []hostClaim) map[string]bool {
+	bySite := map[string][]hostClaim{}
+	var sites []string
+	for _, c := range list {
+		if _, ok := bySite[c.siteID]; !ok {
+			sites = append(sites, c.siteID)
 		}
-		rest = rest[i+len(marker):]
-		end := strings.Index(rest, "`)")
-		if end < 0 {
-			return hosts
-		}
-		hosts = append(hosts, rest[:end])
-		rest = rest[end+2:]
+		bySite[c.siteID] = append(bySite[c.siteID], c)
 	}
+	if len(sites) < 2 {
+		return nil
+	}
+	conflicts := map[string]bool{}
+	for i := 0; i < len(sites); i++ {
+		for j := i + 1; j < len(sites); j++ {
+			if claimsOverlap(bySite[sites[i]], bySite[sites[j]]) {
+				conflicts[sites[i]] = true
+				conflicts[sites[j]] = true
+			}
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	winner := ""
+	for site := range conflicts {
+		if winner == "" || site < winner {
+			winner = site
+		}
+	}
+	losers := map[string]bool{}
+	for site := range conflicts {
+		if site != winner {
+			losers[site] = true
+		}
+	}
+	return losers
+}
+
+func claimsOverlap(a, b []hostClaim) bool {
+	for _, left := range a {
+		for _, right := range b {
+			if entryPointsOverlap(left.eps, right.eps) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func entryPointsOverlap(a, b []string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return true
+	}
+	for _, left := range a {
+		if slices.Contains(b, left) {
+			return true
+		}
+	}
+	return false
+}
+
+func siteIDFromRouter(name, rule string) string {
+	for _, host := range exactHosts(rule) {
+		suffix := "-" + host
+		if strings.HasPrefix(name, "forge-") && strings.HasSuffix(name, suffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(name, "forge-"), suffix)
+			if id != "" {
+				return id
+			}
+		}
+	}
+	return name
+}
+
+func exactHosts(rule string) []string {
+	parts := strings.Split(rule, " || ")
+	hosts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		host, ok := exactHostPart(part)
+		if ok {
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	sort.Strings(values)
+	out := []string{values[0]}
+	for _, v := range values[1:] {
+		if v != out[len(out)-1] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func plainHostname(value string) bool {
+	if value == "" || len(value) > 253 || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") || strings.Contains(value, "..") {
+		return false
+	}
+	labels := strings.Split(value, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if c >= 'a' && c <= 'z' {
+				continue
+			}
+			if c >= 'A' && c <= 'Z' {
+				continue
+			}
+			if c >= '0' && c <= '9' {
+				continue
+			}
+			if c == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func ruleWithoutHosts(rule string, drop map[string]bool) (string, bool) {
