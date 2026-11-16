@@ -681,28 +681,21 @@ func ownedProvider(t *testing.T, client ForgeClient) *Provider {
 	return p
 }
 
-func installedSite(id, name string, tags ...string) ForgeSite {
-	return ForgeSite{
-		ID:   id,
-		Type: "sites",
-		Attributes: ForgeSiteAttributes{
-			Name:   name,
-			Status: "installed",
-			Tags:   tags,
-		},
-	}
+func installedSite(id, name string) ForgeSite {
+	site := ForgeSite{ID: id}
+	site.Type = "sites"
+	site.Attributes.Name = name
+	site.Attributes.Status = statusInstalled
+	return site
 }
 
 func domainRecord(name, wwwRedirect string) ForgeDomain {
-	return ForgeDomain{
-		ID:   name,
-		Type: "domainRecords",
-		Attributes: ForgeDomainAttributes{
-			Name:            name,
-			Status:          "enabled",
-			WWWRedirectType: wwwRedirect,
-		},
-	}
+	domain := ForgeDomain{ID: name}
+	domain.Type = "domainRecords"
+	domain.Attributes.Name = name
+	domain.Attributes.Status = statusEnabled
+	domain.Attributes.WWWRedirectType = wwwRedirect
+	return domain
 }
 
 func routerRule(cfg *dynamic.Configuration, name string) string {
