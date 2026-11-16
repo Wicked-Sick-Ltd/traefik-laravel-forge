@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/traefik/genconf/dynamic"
 )
 
 const (
@@ -649,6 +651,241 @@ func TestResolveUpstream(t *testing.T) {
 
 // Stop must be safe to call at any point in the lifecycle: after Provide, twice
 // in a row, and on a provider that never started.
+type catalogForge struct {
+	servers []ForgeServer
+	sites   map[string][]ForgeSite
+	domains map[string][]ForgeDomain
+	reverb  map[string]*ForgeReverbIntegration
+}
+
+func (c catalogForge) FetchServers() ([]ForgeServer, error) { return c.servers, nil }
+func (c catalogForge) FetchSites(serverID string) ([]ForgeSite, error) {
+	return c.sites[serverID], nil
+}
+func (c catalogForge) FetchDomains(_, siteID string) ([]ForgeDomain, error) {
+	return c.domains[siteID], nil
+}
+func (c catalogForge) FetchReverbIntegration(_, siteID string) (*ForgeReverbIntegration, error) {
+	return c.reverb[siteID], nil
+}
+
+func ownedProvider(t *testing.T, client ForgeClient) *Provider {
+	t.Helper()
+	p, err := NewProviderWithClient(&Config{
+		PollInterval:        "30s",
+		DefaultSitesEnabled: true,
+	}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func installedSite(id, name string, tags ...string) ForgeSite {
+	return ForgeSite{
+		ID:   id,
+		Type: "sites",
+		Attributes: ForgeSiteAttributes{
+			Name:   name,
+			Status: "installed",
+			Tags:   tags,
+		},
+	}
+}
+
+func domainRecord(name, wwwRedirect string) ForgeDomain {
+	return ForgeDomain{
+		ID:   name,
+		Type: "domainRecords",
+		Attributes: ForgeDomainAttributes{
+			Name:            name,
+			Status:          "enabled",
+			WWWRedirectType: wwwRedirect,
+		},
+	}
+}
+
+func routerRule(cfg *dynamic.Configuration, name string) string {
+	r := cfg.HTTP.Routers[name]
+	if r == nil {
+		return ""
+	}
+	return r.Rule
+}
+
+func ruleHas(rule, host string) bool {
+	return strings.Contains(rule, "Host(`"+host+"`)")
+}
+
+// TestExactTieStaysOnline pins the startup case where two sites list the same
+// canonical hostname and there is no remembered owner. The lower site key
+// keeps the name, and the following poll keeps that same site.
+func TestExactTieStaysOnline(t *testing.T) {
+	client := catalogForge{
+		servers: []ForgeServer{{
+			ID:   "s1",
+			Type: "servers",
+			Attributes: ForgeServerAttributes{
+				Name:             "app01",
+				PrivateIPAddress: "10.0.0.1",
+			},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("b", "shop.example.com"), installedSite("a", "shop.example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"a": {domainRecord("shop.example.com", "")},
+			"b": {domainRecord("shop.example.com", "")},
+		},
+	}
+	p := ownedProvider(t, client)
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routerRule(cfg, "forge-a-shop.example.com") == "" {
+		t.Fatal("exact tie published no router for the lower site key")
+	}
+	if routerRule(cfg, "forge-b-shop.example.com") != "" {
+		t.Fatal("exact tie published a second router")
+	}
+
+	cfg, err = p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routerRule(cfg, "forge-a-shop.example.com") == "" || routerRule(cfg, "forge-b-shop.example.com") != "" {
+		t.Fatal("remembered owner changed on the second poll")
+	}
+}
+
+// TestCaseVariantDoesNotCaptureExactHost keeps the protection that a
+// non-canonical spelling loses to one exact spelling.
+func TestCaseVariantDoesNotCaptureExactHost(t *testing.T) {
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("low", "shop.example.com"), installedSite("high", "shop.example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"low":  {domainRecord("Shop.Example.com.", "")},
+			"high": {domainRecord("shop.example.com", "")},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routerRule(cfg, "forge-high-shop.example.com") == "" {
+		t.Fatal("exact spelling lost the hostname")
+	}
+	if routerRule(cfg, "forge-low-shop.example.com") != "" {
+		t.Fatal("case and trailing-dot variant captured the hostname")
+	}
+}
+
+// TestExplicitWWWOutranksImpliedRedirect gives www to the site that has a
+// real www record, and still serves an uncontested www host after the apex
+// is lost.
+func TestExplicitWWWOutranksImpliedRedirect(t *testing.T) {
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("apex", "example.com"), installedSite("wwwsite", "www.example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"apex":    {domainRecord("example.com", "to-www")},
+			"wwwsite": {domainRecord("www.example.com", "")},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	apexRule := routerRule(cfg, "forge-apex-example.com")
+	if !ruleHas(apexRule, "example.com") {
+		t.Fatalf("apex rule = %q", apexRule)
+	}
+	if ruleHas(apexRule, "www.example.com") {
+		t.Fatalf("implied www stayed on the apex router: %s", apexRule)
+	}
+	wwwRule := routerRule(cfg, "forge-wwwsite-www.example.com")
+	if !ruleHas(wwwRule, "www.example.com") {
+		t.Fatalf("explicit www record was not routed: %q", wwwRule)
+	}
+}
+
+func TestLostApexStillServesOwnedWWW(t *testing.T) {
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("owner", "example.com"), installedSite("other", "example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"owner": {domainRecord("Example.com", "to-www")},
+			"other": {domainRecord("example.com", "")},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routerRule(cfg, "forge-other-example.com") == "" {
+		t.Fatal("exact apex was not routed")
+	}
+	wwwRule := routerRule(cfg, "forge-owner-example.com")
+	if !ruleHas(wwwRule, "www.example.com") {
+		t.Fatalf("uncontested www host was dropped: %q", wwwRule)
+	}
+	if ruleHas(wwwRule, "example.com") {
+		t.Fatalf("lost apex was included in the rule: %s", wwwRule)
+	}
+}
+
+func TestReverbSurvivesLossOfMainHost(t *testing.T) {
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("b", "shop.example.com"), installedSite("a", "shop.example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"a": {domainRecord("shop.example.com", "")},
+			"b": {domainRecord("shop.example.com", ""), domainRecord("ws.shop.example.com", "")},
+		},
+		reverb: map[string]*ForgeReverbIntegration{
+			"b": {Enabled: true, Host: "ws.shop.example.com"},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routerRule(cfg, "forge-a-shop.example.com") == "" {
+		t.Fatal("lower key did not keep the shared apex")
+	}
+	if routerRule(cfg, "forge-b-shop.example.com") != "" {
+		t.Fatal("losing site still published the apex")
+	}
+	if routerRule(cfg, "forge-b-ws.shop.example.com") == "" {
+		t.Fatal("reverb host the site alone owns was not published")
+	}
+	if cfg.HTTP.Services["forge-shop.example.com-b-service"] == nil {
+		t.Fatal("service was not created for the reverb-only publish")
+	}
+}
+
 func TestStopIsSafeAndIdempotent(t *testing.T) {
 	p, err := NewProviderWithClient(&Config{PollInterval: "30s"}, stubClient{})
 	if err != nil {

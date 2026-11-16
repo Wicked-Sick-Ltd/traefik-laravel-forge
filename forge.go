@@ -553,9 +553,16 @@ type sitePlan struct {
 }
 
 func (s *sitePlan) claim(r hostRoute) {
-	for _, h := range []string{r.host, r.wwwHost} {
-		if h != "" && !s.claims[h] {
-			s.claims[h] = r.exact
+	if r.host != "" {
+		// An explicit record or alias can upgrade a weaker claim. It must not
+		// downgrade one that was already exact.
+		s.claims[r.host] = s.claims[r.host] || r.exact
+	}
+	if r.wwwHost != "" {
+		// A www host implied by a redirect is not an exact claim. An explicit
+		// www record, claimed as r.host on its own route, outranks it.
+		if _, ok := s.claims[r.wwwHost]; !ok {
+			s.claims[r.wwwHost] = false
 		}
 	}
 }
@@ -728,9 +735,11 @@ func routerNameFor(siteID, host string) string {
 // higher priority or earlier router would take the other site's traffic.
 //
 // A name asked for by one site belongs to it. When several sites ask, the site
-// that served the name after the previous poll keeps it; failing that, the one
-// site whose Forge record or tag spells it exactly gets it; failing that, no
-// site does.
+// that served the name after the previous poll keeps it. Failing that, the one
+// site whose Forge record or tag spells it exactly gets it. Failing that, an
+// exact tie goes to the lowest site key so the name stays online, and that
+// choice is what the next poll remembers. A tie in which nobody spelled it
+// exactly goes to no site, so a case or trailing-dot variant cannot capture it.
 func (p *Provider) resolveHostOwners(plans []sitePlan) map[string]string {
 	claimants := make(map[string][]int)
 	for i := range plans {
@@ -772,6 +781,17 @@ func pickHostOwner(host string, idx []int, plans []sitePlan, incumbent string) (
 			host, strings.Join(names, ", "), plans[exact[0]].name)
 		return plans[exact[0]].key, true
 	}
+	if len(exact) > 1 {
+		winner := exact[0]
+		for _, i := range exact[1:] {
+			if plans[i].key < plans[winner].key {
+				winner = i
+			}
+		}
+		fmt.Fprintf(os.Stderr, "forge: host %q is requested by sites %s; routing the exact tie to site %q\n",
+			host, strings.Join(names, ", "), plans[winner].name)
+		return plans[winner].key, true
+	}
 	fmt.Fprintf(os.Stderr, "forge: host %q is requested by sites %s; routing it to none of them\n",
 		host, strings.Join(names, ", "))
 	return "", false
@@ -791,7 +811,13 @@ func emitSite(
 			routersCreated++
 		}
 	}
-
+	for _, r := range plan.reverb {
+		if emitRoute(plan, r, owners, published, configuration, redirectMiddlewareName) {
+			routersCreated++
+			pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+				plan.name, r.host, plan.backendURL)
+		}
+	}
 	if routersCreated == 0 {
 		return
 	}
@@ -804,13 +830,6 @@ func emitSite(
 	}
 
 	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, plan.name, plan.backendURL)
-
-	for _, r := range plan.reverb {
-		if emitRoute(plan, r, owners, published, configuration, redirectMiddlewareName) {
-			pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
-				plan.name, r.host, plan.backendURL)
-		}
-	}
 }
 
 func emitRoute(
@@ -820,20 +839,29 @@ func emitRoute(
 	configuration *dynamic.Configuration,
 	redirectMiddlewareName string,
 ) bool {
-	if owners[r.host] != plan.key {
+	ownsHost := owners[r.host] == plan.key
+	ownsWWW := r.wwwHost != "" && owners[r.wwwHost] == plan.key
+	if !ownsHost && !ownsWWW {
 		return false
 	}
-	hosts := []string{r.host}
-	if r.wwwHost != "" && owners[r.wwwHost] == plan.key {
+	hosts := make([]string, 0, 2)
+	if ownsHost {
+		hosts = append(hosts, r.host)
+	}
+	if ownsWWW {
 		hosts = append(hosts, r.wwwHost)
 	}
 	var wildcardHosts []string
-	if r.wildcard {
+	if r.wildcard && ownsHost {
 		wildcardHosts = []string{r.host}
+	}
+	priorityHost := r.host
+	if !ownsHost {
+		priorityHost = r.wwwHost
 	}
 
 	createRouter(r.routerName, buildHostRule(hosts, wildcardHosts), plan.serviceName, r.tags,
-		r.enableTLS, r.certResolver, domainPriority(r.host), configuration, redirectMiddlewareName)
+		r.enableTLS, r.certResolver, domainPriority(priorityHost), configuration, redirectMiddlewareName)
 	for _, h := range hosts {
 		published[h] = plan.key
 	}
