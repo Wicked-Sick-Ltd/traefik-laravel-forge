@@ -166,7 +166,7 @@ func TestGenerateConfiguration_NonPrivateUpstreamOverrideIsSkipped(t *testing.T)
 }
 
 func TestGenerateConfiguration_HTTPSSchemePublishesPublicOrigin(t *testing.T) {
-	server := makeServer("s1", "app01", "10.0.0.1", "traefik:upstream-scheme=https", "traefik:upstream-host=203.0.113.9")
+	server := makeServer("s1", "app01", "10.0.0.1", "traefik:upstream-scheme=https", "traefik:upstream-host=origin.example.com")
 	m := mocks.NewMockForgeClient(t)
 	m.EXPECT().FetchServers().Return([]forge.ForgeServer{server}, nil)
 	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
@@ -179,7 +179,7 @@ func TestGenerateConfiguration_HTTPSSchemePublishesPublicOrigin(t *testing.T) {
 	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
 	require.NotNil(t, svc)
 	require.Len(t, svc.LoadBalancer.Servers, 1)
-	assert.Equal(t, "https://203.0.113.9:443", svc.LoadBalancer.Servers[0].URL)
+	assert.Equal(t, "https://origin.example.com:443", svc.LoadBalancer.Servers[0].URL)
 }
 
 func TestGenerateConfiguration_CleartextCIDRPublishesOverlay(t *testing.T) {

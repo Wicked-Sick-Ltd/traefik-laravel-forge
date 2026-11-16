@@ -48,8 +48,9 @@ loopback IP address, or an address inside `cleartextCIDRs`. A server with no
 private IP, or with an `upstream-host` / `upstreamHost` override that is a
 public IP or a hostname, is skipped with a log line rather than proxied in the
 clear across the internet. Tag the server `traefik:upstream-scheme=https` (or
-set `upstreamScheme: https` on its mapping) to publish that origin over TLS
-instead.
+set `upstreamScheme: https` on its mapping) and point `upstream-host` at a
+hostname the origin certificate covers. An IP literal is not published over
+HTTPS, because Traefik checks the certificate against the URL host.
 
 Each site produces:
 - A **main router** covering all its primary and alias domains (with `HostRegexp` for wildcard-enabled domains)
@@ -215,7 +216,7 @@ Add these to a server in Forge to override how it's addressed:
 | Tag | Example | Description |
 |-----|---------|-------------|
 | `traefik:upstream-host` | `traefik:upstream-host=10.0.1.10` | Override the auto-detected server IP. On `http`, must be a private or loopback IP, or an address inside `cleartextCIDRs` |
-| `traefik:upstream-scheme` | `traefik:upstream-scheme=https` | Dial the origin over TLS. Required to publish a public IP or a hostname. An implicit port of 80 becomes 443 |
+| `traefik:upstream-scheme` | `traefik:upstream-scheme=https` | Dial the origin over TLS. The host must be a hostname the certificate covers, not an IP. An implicit port of 80 becomes 443 |
 | `traefik:upstream-port` | `traefik:upstream-port=8080` | Override the default backend port (80) |
 | `traefik:traefik-id` | `traefik:traefik-id=lb01` | Informational: which Traefik instance handles this server |
 

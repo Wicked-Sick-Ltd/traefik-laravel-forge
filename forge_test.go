@@ -765,7 +765,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 		}
 	})
 
-	t.Run("https scheme publishes a public address", func(t *testing.T) {
+	t.Run("https scheme refuses an IP literal", func(t *testing.T) {
 		srv := public
 		srv.Attributes.Tags = []string{"traefik:upstream-scheme=https"}
 		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
@@ -776,7 +776,24 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := serviceURL(t, cfg); got != "https://203.0.113.1:443" {
+		if len(cfg.HTTP.Services) != 0 {
+			t.Fatal("https origin used an IP literal, which the certificate cannot cover")
+		}
+	})
+
+	t.Run("bracketed IPv6 upstream stays on cleartext HTTP", func(t *testing.T) {
+		srv := public
+		srv.Attributes.IPAddress = ""
+		srv.Attributes.Tags = []string{"traefik:upstream-host=[fd00::5]"}
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceURL(t, cfg); got != "http://[fd00::5]:80" {
 			t.Errorf("url = %q", got)
 		}
 	})
@@ -821,6 +838,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 		srv := public
 		srv.Attributes.Tags = []string{
 			"traefik:upstream-scheme=https",
+			"traefik:upstream-host=origin.example.com",
 			"traefik:upstream-port=8443",
 		}
 		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
@@ -831,7 +849,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := serviceURL(t, cfg); got != "https://203.0.113.1:8443" {
+		if got := serviceURL(t, cfg); got != "https://origin.example.com:8443" {
 			t.Errorf("url = %q", got)
 		}
 	})

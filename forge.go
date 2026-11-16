@@ -472,7 +472,7 @@ func (p *Provider) processServer(
 		if !hostOK {
 			pluginLog.Printf("Server %q upstream %q is not a private or loopback IP address — "+
 				"not publishing its sites over cleartext HTTP. "+
-				"Set traefik:upstream-scheme=https to publish it over TLS, or add its network to cleartextCIDRs",
+				"Set traefik:upstream-scheme=https with a hostname the certificate covers, or add its network to cleartextCIDRs",
 				server.Attributes.Name, upstreamHost)
 			return nil
 		}
@@ -581,6 +581,7 @@ func parseCleartextCIDRs(cidrs []string) ([]*net.IPNet, error) {
 // private or loopback literal, or falls inside an operator-configured
 // cleartextCIDR. Anything else is refused.
 func (p *Provider) cleartextDialHost(host string) (string, bool) {
+	host = stripHostBrackets(host)
 	if ip := privateNetworkIP(host); ip != nil {
 		return ip.String(), true
 	}
@@ -625,21 +626,27 @@ func portWasSet(tag ServerConfig, mapping *ServerMapping) bool {
 	return tag.UpstreamHost == "" && mapping != nil && mapping.UpstreamPort != 0
 }
 
-// httpsDialHost accepts an IP literal or a hostname for an HTTPS origin.
-// Control characters and URL punctuation are refused so a tag cannot forge a
-// log line or point the URL somewhere else.
+// stripHostBrackets removes one pair of URL brackets from an IPv6 literal.
+// net.ParseIP rejects the brackets, and a working cleartext IPv6 override is
+// written with them.
+func stripHostBrackets(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// httpsDialHost accepts a hostname for an HTTPS origin. An IP literal is
+// refused: Traefik verifies the origin certificate against the URL host, and
+// a certificate issued for the site name does not cover the IP. Control
+// characters and URL punctuation are refused so a tag cannot forge a log line.
 func httpsDialHost(host string) (string, bool) {
 	if host == "" || len(host) > 253 {
 		return "", false
 	}
-	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
-		host = host[1 : len(host)-1]
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			return v4.String(), true
-		}
-		return ip.String(), true
+	host = stripHostBrackets(host)
+	if net.ParseIP(host) != nil {
+		return "", false
 	}
 	if strings.Contains(host, ":") || strings.Contains(host, "/") || strings.Contains(host, "@") ||
 		strings.Contains(host, "#") || strings.Contains(host, " ") || strings.Contains(host, "\\") {

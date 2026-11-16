@@ -164,8 +164,11 @@ server to be skipped with a log line. The same rule applies to a
 `serverMappings` `upstreamHost`, and to a server whose only Forge address is
 the public `ip_address` — the plugin does not fall back to it.
 
-Set `traefik:upstream-scheme=https` to publish a public IP or a hostname over
-TLS instead. See that tag below.
+Set `traefik:upstream-scheme=https` and a hostname to publish over TLS instead.
+An IP is refused on that scheme, because the certificate is checked against
+the URL host. A bracketed IPv6 address is accepted on the default `http`
+scheme when it is private, loopback, or inside `cleartextCIDRs`. See the
+scheme tag below.
 
 Aliases: `traefik:lb-host`, `traefik:loadbalancer-host`
 
@@ -174,9 +177,10 @@ Aliases: `traefik:lb-host`, `traefik:loadbalancer-host`
 ### `traefik:upstream-scheme`
 
 Choose how Traefik dials this server. `http` is the default and keeps the
-private-address gate above. `https` publishes the resolved host, including a
-public IP or a hostname, as `https://`. When the port was not set explicitly,
-80 becomes 443.
+private-address gate above. `https` publishes a hostname as `https://`. An IP
+literal is skipped: Traefik verifies the origin certificate against the URL
+host, and a certificate for the site name does not cover the IP. When the
+port was not set explicitly, 80 becomes 443.
 
 ```
 traefik:upstream-scheme=https

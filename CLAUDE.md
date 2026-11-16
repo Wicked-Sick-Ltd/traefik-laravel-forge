@@ -142,8 +142,11 @@ fallback to Forge's public `ip_address`.
 Two explicit opt-ins keep such a server routed:
 
 - `traefik:upstream-scheme=https` (or `serverMappings` `upstreamScheme: https`)
-  publishes `https://` for a public IP or a hostname. An implicit port of 80
-  becomes 443; an explicit port is kept.
+  publishes `https://` for a hostname. An IP literal is refused, because the
+  certificate is checked against the URL host. An implicit port of 80 becomes
+  443; an explicit port is kept. A bracketed IPv6 literal is accepted on
+  cleartext HTTP when the address inside is private, loopback, or in
+  `cleartextCIDRs`.
 - `cleartextCIDRs` adds networks the operator is willing to dial in the clear,
   such as a CGNAT overlay.
 

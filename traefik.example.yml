@@ -69,8 +69,9 @@ providers:
       # Optional: override IP, port or scheme for specific servers.
       # Usually not needed — the plugin auto-detects private IPs from Forge.
       # On the default http scheme, upstreamHost must be a private or loopback
-      # IP (or an address inside cleartextCIDRs). Set upstreamScheme: https to
-      # publish a public address or a hostname over TLS.
+      # IP (or an address inside cleartextCIDRs). Set upstreamScheme: https and
+      # a hostname the certificate covers to publish over TLS. An IP is not
+      # published on https.
       # serverMappings:
       #   - forgeServerName: "app01"
       #     upstreamHost: "10.0.1.10"
