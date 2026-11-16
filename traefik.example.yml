@@ -66,12 +66,18 @@ providers:
       # Set to false for opt-in mode: only sites tagged traefik:enabled=true are routed.
       # defaultSitesEnabled: true
 
-      # Optional: override IP or port for specific servers.
+      # Optional: override IP, port or scheme for specific servers.
       # Usually not needed — the plugin auto-detects private IPs from Forge.
+      # On the default http scheme, upstreamHost must be a private or loopback
+      # IP (or an address inside cleartextCIDRs). Set upstreamScheme: https and
+      # a hostname the certificate covers to publish over TLS. An IP is not
+      # published on https.
       # serverMappings:
       #   - forgeServerName: "app01"
       #     upstreamHost: "10.0.1.10"
       #     upstreamPort: 80
+      # cleartextCIDRs:
+      #   - "100.64.0.0/10"
 
 # --- Plugin installation ---
 # For production (Traefik Plugin Catalog):

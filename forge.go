@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +27,9 @@ type ServerMapping struct {
 	ForgeServerName string `json:"forgeServerName,omitempty"`
 	UpstreamHost    string `json:"upstreamHost,omitempty"`
 	UpstreamPort    int    `json:"upstreamPort,omitempty"`
+	// UpstreamScheme is "http" or "https". https publishes the host even when
+	// it is a public address or a hostname, because the hop is no longer cleartext.
+	UpstreamScheme string `json:"upstreamScheme,omitempty"`
 }
 
 // Config is the plugin configuration.
@@ -40,6 +44,10 @@ type Config struct {
 	RedirectMiddleware  string          `json:"redirectMiddleware,omitempty"`
 	TraefikID           string          `json:"traefikID,omitempty"`
 	ServerMappings      []ServerMapping `json:"serverMappings,omitempty"`
+	// CleartextCIDRs are extra networks that may be dialed over cleartext HTTP,
+	// in addition to RFC 1918, IPv6 ULA and loopback. Use this for an overlay
+	// the operator trusts, such as a CGNAT range. Each entry is a CIDR.
+	CleartextCIDRs []string `json:"cleartextCIDRs,omitempty"`
 }
 
 // CreateConfig creates the default plugin configuration.
@@ -146,6 +154,7 @@ type Provider struct {
 	redirectMiddleware  string
 	traefikID           string
 	serverMappings      []ServerMapping
+	cleartextNets       []*net.IPNet
 	client              ForgeClient
 
 	cacheTTL time.Duration
@@ -171,6 +180,10 @@ func NewProviderWithClient(config *Config, client ForgeClient) (*Provider, error
 	if err != nil {
 		return nil, err
 	}
+	nets, err := parseCleartextCIDRs(config.CleartextCIDRs)
+	if err != nil {
+		return nil, err
+	}
 	return &Provider{
 		name:                "custom",
 		pollInterval:        pi,
@@ -182,6 +195,7 @@ func NewProviderWithClient(config *Config, client ForgeClient) (*Provider, error
 		redirectMiddleware:  config.RedirectMiddleware,
 		traefikID:           config.TraefikID,
 		serverMappings:      config.ServerMappings,
+		cleartextNets:       nets,
 		client:              client,
 	}, nil
 }
@@ -204,6 +218,10 @@ func New(_ context.Context, config *Config, name string) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	nets, err := parseCleartextCIDRs(config.CleartextCIDRs)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Provider{
 		name:                name,
@@ -218,6 +236,7 @@ func New(_ context.Context, config *Config, name string) (*Provider, error) {
 		redirectMiddleware:  config.RedirectMiddleware,
 		traefikID:           config.TraefikID,
 		serverMappings:      config.ServerMappings,
+		cleartextNets:       nets,
 		client:              newForgeHTTPClient(config.APIToken, config.Organization),
 	}, nil
 }
@@ -430,11 +449,41 @@ func (p *Provider) processServer(
 		return nil
 	}
 
-	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
+	if mapping != nil && mapping.UpstreamScheme != "" && !validScheme(mapping.UpstreamScheme) {
+		pluginLog.Printf("Ignoring invalid upstreamScheme %q on server %q (want http or https)",
+			mapping.UpstreamScheme, server.Attributes.Name)
+	}
+	scheme := dialScheme(tagConfig, mapping)
+
+	var dialHost string
+	var hostOK bool
+	if scheme == "https" {
+		dialHost, hostOK = httpsDialHost(upstreamHost)
+		if !hostOK {
+			pluginLog.Printf("Server %q upstream %q is not a usable HTTPS origin — not publishing its sites",
+				server.Attributes.Name, upstreamHost)
+			return nil
+		}
+		if !portWasSet(tagConfig, mapping) && upstreamPort == 80 {
+			upstreamPort = 443
+		}
+	} else {
+		dialHost, hostOK = p.cleartextDialHost(upstreamHost)
+		if !hostOK {
+			pluginLog.Printf("Server %q upstream %q is not a private or loopback IP address — "+
+				"not publishing its sites over cleartext HTTP. "+
+				"Set traefik:upstream-scheme=https with a hostname the certificate covers, or add its network to cleartextCIDRs",
+				server.Attributes.Name, upstreamHost)
+			return nil
+		}
+	}
+	upstreamHost = dialHost
+
+	pluginLog.Printf("Processing server %q -> %q", server.Attributes.Name, originURL(scheme, upstreamHost, upstreamPort))
 
 	for _, site := range sites {
 		if err := p.processSite(
-			site, server.ID, upstreamHost, upstreamPort, configuration, redirectMiddlewareName,
+			site, server.ID, scheme, upstreamHost, upstreamPort, configuration, redirectMiddlewareName,
 		); err != nil {
 			return err
 		}
@@ -452,16 +501,26 @@ func (p *Provider) resolveUpstream(
 	mapping *ServerMapping,
 ) (host string, port int) {
 	port = 80
+	// A port tag applies even when the host comes from a mapping or from Forge.
+	// portSet distinguishes an explicit port from the default of 80.
+	if tagConfig.portSet {
+		port = tagConfig.UpstreamPort
+	} else if tagConfig.UpstreamHost != "" {
+		port = tagConfig.UpstreamPort
+	}
 
 	switch {
 	case tagConfig.UpstreamHost != "":
-		return tagConfig.UpstreamHost, tagConfig.UpstreamPort
+		return tagConfig.UpstreamHost, port
 	case mapping != nil && mapping.UpstreamHost != "":
-		return mapping.UpstreamHost, mappingPort(mapping)
+		if !tagConfig.portSet {
+			port = mappingPort(mapping)
+		}
+		return mapping.UpstreamHost, port
 	}
 
 	// A mapping may override only the port and leave the host to auto-detection.
-	if mapping != nil {
+	if !tagConfig.portSet && mapping != nil {
 		port = mappingPort(mapping)
 	}
 
@@ -473,6 +532,154 @@ func (p *Provider) resolveUpstream(
 	default:
 		return "", port
 	}
+}
+
+// privateNetworkIP returns host as a parsed IP when it is a literal private
+// (RFC 1918 / RFC 4193) or loopback address, and nil otherwise. Backends are
+// dialed over cleartext HTTP, so anything else — a public IP, or a hostname whose
+// resolution the plugin cannot vouch for — would expose proxied requests,
+// cookies included, to every network between Traefik and the origin.
+func privateNetworkIP(host string) net.IP {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	// fd00:ec2::254 is inside fc00::/7, so IsPrivate is true, but it is the
+	// EC2 IPv6 instance-metadata address. The IPv4 metadata address is already
+	// refused because it is link-local.
+	if ip.Equal(net.ParseIP("fd00:ec2::254")) {
+		return nil
+	}
+	if ip.IsPrivate() || ip.IsLoopback() {
+		return ip
+	}
+	return nil
+}
+
+// originURL builds the backend URL. scheme is "http" or "https". host is a
+// hostname or an IP literal without brackets; JoinHostPort adds them for IPv6.
+func originURL(scheme, host string, port int) string {
+	if scheme == "" {
+		scheme = "http"
+	}
+	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// parseCleartextCIDRs parses operator-supplied extra networks that may be
+// dialed over cleartext HTTP. A bad entry fails provider creation so a typo
+// cannot silently drop the allow-list.
+func parseCleartextCIDRs(cidrs []string) ([]*net.IPNet, error) {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(strings.TrimSpace(c))
+		if err != nil {
+			return nil, fmt.Errorf("cleartextCIDRs: %q is not a CIDR", c)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+// cleartextDialHost returns the address to dial over HTTP when host is a
+// private or loopback literal, or falls inside an operator-configured
+// cleartextCIDR. Anything else is refused.
+func (p *Provider) cleartextDialHost(host string) (string, bool) {
+	host = stripHostBrackets(host)
+	if ip := privateNetworkIP(host); ip != nil {
+		return ip.String(), true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	for _, n := range p.cleartextNets {
+		if n.Contains(ip) {
+			return ip.String(), true
+		}
+	}
+	return "", false
+}
+
+func validScheme(scheme string) bool {
+	return scheme == "http" || scheme == "https"
+}
+
+// dialScheme resolves the backend scheme. A server tag wins over a mapping,
+// and anything else stays on cleartext HTTP behind the private-address gate.
+func dialScheme(tag ServerConfig, mapping *ServerMapping) string {
+	scheme := "http"
+	if mapping != nil && validScheme(mapping.UpstreamScheme) {
+		scheme = mapping.UpstreamScheme
+	}
+	if validScheme(tag.UpstreamScheme) {
+		scheme = tag.UpstreamScheme
+	}
+	return scheme
+}
+
+// portWasSet reports whether the operator chose the upstream port. An implicit
+// port of 80 with scheme https is raised to 443.
+func portWasSet(tag ServerConfig, mapping *ServerMapping) bool {
+	if tag.portSet {
+		return true
+	}
+	return tag.UpstreamHost == "" && mapping != nil && mapping.UpstreamPort != 0
+}
+
+// stripHostBrackets removes one pair of URL brackets from an IPv6 literal.
+// net.ParseIP rejects the brackets, and a working cleartext IPv6 override is
+// written with them.
+func stripHostBrackets(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// httpsDialHost accepts a hostname for an HTTPS origin. An IP literal is
+// refused: Traefik verifies the origin certificate against the URL host, and
+// a certificate issued for the site name does not cover the IP. Control
+// characters and URL punctuation are refused so a tag cannot forge a log line.
+func httpsDialHost(host string) (string, bool) {
+	if host == "" || len(host) > 253 {
+		return "", false
+	}
+	host = stripHostBrackets(host)
+	if net.ParseIP(host) != nil {
+		return "", false
+	}
+	if strings.Contains(host, ":") || strings.Contains(host, "/") || strings.Contains(host, "@") ||
+		strings.Contains(host, "#") || strings.Contains(host, " ") || strings.Contains(host, "\\") {
+		return "", false
+	}
+	for _, r := range host {
+		if r < 0x20 || r == 0x7f || !httpsHostRune(r) {
+			return "", false
+		}
+	}
+	if strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") || strings.Contains(host, "..") {
+		return "", false
+	}
+	return host, true
+}
+
+func httpsHostRune(r rune) bool {
+	if r >= 'a' && r <= 'z' {
+		return true
+	}
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	return r == '.' || r == '-'
 }
 
 // mappingPort returns the mapping's upstream port, defaulting to 80 when unset.
@@ -513,7 +720,7 @@ func isSiteEnabled(tags []string, defaultEnabled bool) bool {
 // non-nil error means routing state is unknown and the poll must be abandoned.
 func (p *Provider) processSite(
 	site ForgeSite,
-	serverID, upstreamHost string,
+	serverID, scheme, upstreamHost string,
 	upstreamPort int,
 	configuration *dynamic.Configuration,
 	redirectMiddlewareName string,
@@ -560,7 +767,7 @@ func (p *Provider) processSite(
 	}
 
 	serviceName := fmt.Sprintf("forge-%s-%s-service", site.Attributes.Name, site.ID)
-	siteBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port)
+	siteBackendURL := originURL(scheme, upstreamHost, tags.Port)
 
 	// One router per Forge domain record.
 	routersCreated := 0
@@ -591,7 +798,7 @@ func (p *Provider) processSite(
 		},
 	}
 
-	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
+	pluginLog.Printf("Created %d router(s) for site %q -> %q", routersCreated, site.Attributes.Name, siteBackendURL)
 
 	// Reverb domains route through the same Nginx backend as the main site.
 	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
@@ -601,7 +808,7 @@ func (p *Provider) processSite(
 		noRedirectTags.HTTPRedirect = false
 		for _, rd := range reverbDomains {
 			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
-				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %q (via Nginx)",
 					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
 			}
 		}
@@ -831,9 +1038,11 @@ func parsePort(value string) (int, bool) {
 
 // ServerConfig holds configuration parsed from server-level tags.
 type ServerConfig struct {
-	UpstreamHost string
-	UpstreamPort int
-	TraefikID    string
+	UpstreamHost   string
+	UpstreamPort   int
+	UpstreamScheme string
+	portSet        bool
+	TraefikID      string
 }
 
 // ParseServerTags parses server tags and returns the resolved ServerConfig.
@@ -851,8 +1060,15 @@ func ParseServerTags(tags []string) ServerConfig {
 		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
 			if port, ok := parsePort(value); ok {
 				cfg.UpstreamPort = port
+				cfg.portSet = true
 			} else {
 				pluginLog.Printf("Ignoring invalid traefik:upstream-port=%q (want 1-65535)", value)
+			}
+		case "upstream-scheme", "upstreamscheme":
+			if value == "http" || value == "https" {
+				cfg.UpstreamScheme = value
+			} else {
+				pluginLog.Printf("Ignoring invalid traefik:%s=%q (want http or https)", key, value)
 			}
 		case "traefik", "traefik-id":
 			cfg.TraefikID = value

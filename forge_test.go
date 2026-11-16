@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/traefik/genconf/dynamic"
 )
 
 const (
@@ -616,6 +618,13 @@ func TestResolveUpstream(t *testing.T) {
 			wantPort: 80,
 		},
 		{
+			name:     "port tag applies to the auto-detected address",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 8443, portSet: true},
+			wantHost: "10.0.0.1",
+			wantPort: 8443,
+		},
+		{
 			name:     "public IP used when there is no private one",
 			server:   publicOnly,
 			tag:      ServerConfig{UpstreamPort: 80},
@@ -642,6 +651,301 @@ func TestResolveUpstream(t *testing.T) {
 				t.Errorf("port = %d, want %d", port, tt.wantPort)
 			}
 		})
+	}
+}
+
+// -- Cleartext origin gate --
+
+func TestPrivateNetworkIP(t *testing.T) {
+	tests := []struct {
+		host string
+		want string // "" means rejected
+	}{
+		{"10.0.0.1", "10.0.0.1"},
+		{"172.16.4.4", "172.16.4.4"},
+		{"192.168.1.9", "192.168.1.9"},
+		{"127.0.0.1", "127.0.0.1"},
+		{"fd00::5", "fd00::5"},
+		{"fd00:ec2::254", ""},
+		{"::1", "::1"},
+		{"::ffff:10.0.0.1", "10.0.0.1"},
+		{"203.0.113.10", ""},
+		{"2001:db8::10", ""},
+		{"::ffff:203.0.113.40", ""},
+		{"100.64.0.1", ""},
+		{"169.254.169.254", ""},
+		{"fe80::1", ""},
+		{"fe80::1%eth0", ""},
+		{"0.0.0.0", ""},
+		{"::", ""},
+		{"010.0.0.1", ""},
+		{"10.0.0.1:80", ""},
+		{"origin.example.com", ""},
+		{"localhost", ""},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			got := ""
+			if ip := privateNetworkIP(tt.host); ip != nil {
+				got = ip.String()
+			}
+			if got != tt.want {
+				t.Errorf("privateNetworkIP(%q) = %q, want %q", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOriginURL(t *testing.T) {
+	if got := originURL("http", "10.0.0.1", 8080); got != "http://10.0.0.1:8080" {
+		t.Errorf("originURL(v4) = %q", got)
+	}
+	if got := originURL("http", "fd00::5", 80); got != "http://[fd00::5]:80" {
+		t.Errorf("originURL(v6) = %q", got)
+	}
+	if got := originURL("https", "origin.example.com", 443); got != "https://origin.example.com:443" {
+		t.Errorf("originURL(https) = %q", got)
+	}
+}
+
+// fixedForge is a ForgeClient with one server and one site and no domains.
+// Slices are filled before the call and returned as stored. Building a
+// ForgeSite inside FetchSites panics under Yaegi.
+type fixedForge struct {
+	servers []ForgeServer
+	sites   map[string][]ForgeSite
+}
+
+func forgeWith(server ForgeServer) *fixedForge {
+	f := &fixedForge{sites: map[string][]ForgeSite{}}
+	f.servers = append(f.servers, server)
+	f.sites[server.ID] = append(f.sites[server.ID], testSite("site1", "example.com"))
+	return f
+}
+
+func (f *fixedForge) FetchServers() ([]ForgeServer, error) { return f.servers, nil }
+func (f *fixedForge) FetchSites(serverID string) ([]ForgeSite, error) {
+	return f.sites[serverID], nil
+}
+func (f *fixedForge) FetchDomains(string, string) ([]ForgeDomain, error) { return nil, nil }
+func (f *fixedForge) FetchReverbIntegration(string, string) (*ForgeReverbIntegration, error) {
+	return nil, nil
+}
+
+func serviceURL(t *testing.T, cfg *dynamic.Configuration) string {
+	t.Helper()
+	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
+	if svc == nil || svc.LoadBalancer == nil || len(svc.LoadBalancer.Servers) != 1 {
+		t.Fatalf("service missing, routers=%d services=%d", len(cfg.HTTP.Routers), len(cfg.HTTP.Services))
+	}
+	return svc.LoadBalancer.Servers[0].URL
+}
+
+// TestUpstreamOptInKeepsNonPrivateOriginsRoutable covers the two ways a server
+// outside RFC 1918 / ULA / loopback can still be published: an explicit https
+// scheme, or a cleartext CIDR the operator listed.
+func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
+	public := ForgeServer{ID: "s1"}
+	public.Type = "servers"
+	public.Attributes.Name = "app01"
+	public.Attributes.IPAddress = "203.0.113.1"
+
+	t.Run("public address stays unpublished on http", func(t *testing.T) {
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(public))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.HTTP.Routers) != 0 || len(cfg.HTTP.Services) != 0 {
+			t.Fatalf("public origin was published: routers=%d", len(cfg.HTTP.Routers))
+		}
+	})
+
+	t.Run("https scheme refuses an IP literal", func(t *testing.T) {
+		srv := public
+		srv.Attributes.Tags = []string{"traefik:upstream-scheme=https"}
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.HTTP.Services) != 0 {
+			t.Fatal("https origin used an IP literal, which the certificate cannot cover")
+		}
+	})
+
+	t.Run("EC2 IPv6 metadata address is not published", func(t *testing.T) {
+		for _, tag := range []string{
+			"traefik:upstream-host=fd00:ec2::254",
+			"traefik:upstream-host=[fd00:ec2::254]",
+		} {
+			srv := public
+			srv.Attributes.IPAddress = ""
+			srv.Attributes.PrivateIPAddress = ""
+			srv.Attributes.Tags = []string{tag}
+			p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := p.GenerateConfiguration()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.HTTP.Services) != 0 {
+				t.Fatalf("%s was published", tag)
+			}
+		}
+	})
+
+	t.Run("bracketed IPv6 upstream stays on cleartext HTTP", func(t *testing.T) {
+		srv := public
+		srv.Attributes.IPAddress = ""
+		srv.Attributes.Tags = []string{"traefik:upstream-host=[fd00::5]"}
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceURL(t, cfg); got != "http://[fd00::5]:80" {
+			t.Errorf("url = %q", got)
+		}
+	})
+
+	t.Run("https scheme publishes a hostname and rejects a newline", func(t *testing.T) {
+		srv := public
+		srv.Attributes.PrivateIPAddress = "10.0.0.1"
+		srv.Attributes.Tags = []string{
+			"traefik:upstream-scheme=https",
+			"traefik:upstream-host=origin.example.com",
+		}
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceURL(t, cfg); got != "https://origin.example.com:443" {
+			t.Errorf("url = %q", got)
+		}
+
+		srv.Attributes.Tags = []string{
+			"traefik:upstream-scheme=https",
+			"traefik:upstream-host=origin.example.com\nforged",
+		}
+		p, err = NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err = p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.HTTP.Services) != 0 {
+			t.Fatal("newline host was published")
+		}
+	})
+
+	t.Run("explicit https port is kept", func(t *testing.T) {
+		srv := public
+		srv.Attributes.Tags = []string{
+			"traefik:upstream-scheme=https",
+			"traefik:upstream-host=origin.example.com",
+			"traefik:upstream-port=8443",
+		}
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceURL(t, cfg); got != "https://origin.example.com:8443" {
+			t.Errorf("url = %q", got)
+		}
+	})
+
+	t.Run("mapping scheme publishes a hostname", func(t *testing.T) {
+		p, err := NewProviderWithClient(&Config{
+			PollInterval:        "30s",
+			DefaultSitesEnabled: true,
+			ServerMappings: []ServerMapping{{
+				ForgeServerName: "app01",
+				UpstreamHost:    "origin.example.com",
+				UpstreamScheme:  "https",
+			}},
+		}, forgeWith(public))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceURL(t, cfg); got != "https://origin.example.com:443" {
+			t.Errorf("url = %q", got)
+		}
+	})
+
+	t.Run("cleartext CIDR publishes an overlay address", func(t *testing.T) {
+		srv := public
+		srv.Attributes.IPAddress = ""
+		srv.Attributes.PrivateIPAddress = "100.64.1.5"
+		p, err := NewProviderWithClient(&Config{
+			PollInterval:        "30s",
+			DefaultSitesEnabled: true,
+			CleartextCIDRs:      []string{"100.64.0.0/10"},
+		}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceURL(t, cfg); got != "http://100.64.1.5:80" {
+			t.Errorf("url = %q", got)
+		}
+	})
+
+	t.Run("overlay address stays unpublished without a CIDR", func(t *testing.T) {
+		srv := public
+		srv.Attributes.IPAddress = ""
+		srv.Attributes.PrivateIPAddress = "100.64.1.5"
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.HTTP.Services) != 0 {
+			t.Fatal("overlay address was published without cleartextCIDRs")
+		}
+	})
+}
+
+func TestNewRejectsBadCleartextCIDR(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.APIToken = testAPIToken
+	cfg.Organization = testOrganization
+	cfg.CleartextCIDRs = []string{"not-a-cidr"}
+	if _, err := New(context.Background(), cfg, "test"); err == nil {
+		t.Fatal("New accepted a cleartextCIDRs entry that is not a CIDR")
 	}
 }
 

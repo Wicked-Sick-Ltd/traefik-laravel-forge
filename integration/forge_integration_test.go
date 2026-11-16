@@ -108,7 +108,7 @@ func TestGenerateConfiguration_BasicRouting(t *testing.T) {
 	assert.Equal(t, "http://10.0.0.1:80", svc.LoadBalancer.Servers[0].URL)
 }
 
-func TestGenerateConfiguration_PublicIPFallback(t *testing.T) {
+func TestGenerateConfiguration_PublicIPOnlyServerIsSkipped(t *testing.T) {
 	server := forge.ForgeServer{
 		ID:   "s1",
 		Type: "servers",
@@ -121,6 +121,55 @@ func TestGenerateConfiguration_PublicIPFallback(t *testing.T) {
 	m := mocks.NewMockForgeClient(t)
 	m.EXPECT().FetchServers().Return([]forge.ForgeServer{server}, nil)
 	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+	require.NoError(t, err)
+
+	assert.Empty(t, cfg.HTTP.Routers)
+	assert.Empty(t, cfg.HTTP.Services)
+}
+
+func TestGenerateConfiguration_NonPrivateUpstreamOverrideIsSkipped(t *testing.T) {
+	tests := []struct {
+		name     string
+		tag      string
+		mappings []forge.ServerMapping
+	}{
+		{name: "public tag", tag: "traefik:upstream-host=203.0.113.9"},
+		{name: "hostname tag", tag: "traefik:upstream-host=origin.example.com"},
+		{name: "link-local tag", tag: "traefik:upstream-host=169.254.169.254"},
+		{
+			name:     "public mapping",
+			mappings: []forge.ServerMapping{{ForgeServerName: "app01", UpstreamHost: "203.0.113.9"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var tags []string
+			if tt.tag != "" {
+				tags = []string{tt.tag}
+			}
+			m := mocks.NewMockForgeClient(t)
+			m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1", tags...)}, nil)
+			m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
+
+			cfg, err := newProviderWithConfig(t, m, func(c *forge.Config) {
+				c.ServerMappings = tt.mappings
+			}).GenerateConfiguration()
+			require.NoError(t, err)
+
+			assert.Empty(t, cfg.HTTP.Routers)
+			assert.Empty(t, cfg.HTTP.Services)
+		})
+	}
+}
+
+func TestGenerateConfiguration_HTTPSSchemePublishesPublicOrigin(t *testing.T) {
+	server := makeServer("s1", "app01", "10.0.0.1", "traefik:upstream-scheme=https", "traefik:upstream-host=origin.example.com")
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{server}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
 	noDomains(m, "s1", "site1")
 	noReverb(m, "s1", "site1")
 
@@ -129,7 +178,41 @@ func TestGenerateConfiguration_PublicIPFallback(t *testing.T) {
 
 	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
 	require.NotNil(t, svc)
-	assert.Equal(t, "http://203.0.113.1:80", svc.LoadBalancer.Servers[0].URL)
+	require.Len(t, svc.LoadBalancer.Servers, 1)
+	assert.Equal(t, "https://origin.example.com:443", svc.LoadBalancer.Servers[0].URL)
+}
+
+func TestGenerateConfiguration_CleartextCIDRPublishesOverlay(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "100.64.1.5")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
+	noDomains(m, "s1", "site1")
+	noReverb(m, "s1", "site1")
+
+	cfg, err := newProviderWithConfig(t, m, func(c *forge.Config) {
+		c.CleartextCIDRs = []string{"100.64.0.0/10"}
+	}).GenerateConfiguration()
+	require.NoError(t, err)
+
+	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
+	require.NotNil(t, svc)
+	require.Len(t, svc.LoadBalancer.Servers, 1)
+	assert.Equal(t, "http://100.64.1.5:80", svc.LoadBalancer.Servers[0].URL)
+}
+
+func TestGenerateConfiguration_PrivateIPv6UpstreamIsBracketed(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "fd00::5")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com")}, nil)
+	noDomains(m, "s1", "site1")
+	noReverb(m, "s1", "site1")
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+	require.NoError(t, err)
+
+	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
+	require.NotNil(t, svc)
+	assert.Equal(t, "http://[fd00::5]:80", svc.LoadBalancer.Servers[0].URL)
 }
 
 func TestGenerateConfiguration_TLSwithCertResolver(t *testing.T) {
