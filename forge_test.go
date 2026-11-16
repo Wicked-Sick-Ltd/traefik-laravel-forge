@@ -11,6 +11,7 @@ import (
 const (
 	testAPIToken     = "test-token"
 	testOrganization = "test-org"
+	testResolver     = "cloudflare"
 )
 
 // -- Config / lifecycle tests (yaegi-compatible, no testify) --
@@ -336,7 +337,7 @@ func TestBuildTagMap(t *testing.T) {
 
 func TestParseSiteTags(t *testing.T) {
 	defaults := siteDefaults{
-		CertResolver: "cloudflare",
+		CertResolver: testResolver,
 		SitesEnabled: true,
 		HTTPRedirect: true,
 		Port:         80,
@@ -347,8 +348,8 @@ func TestParseSiteTags(t *testing.T) {
 		if !got.Enabled {
 			t.Error("Enabled should be true by default")
 		}
-		if got.CertResolver != "cloudflare" {
-			t.Errorf("CertResolver = %q, want %q", got.CertResolver, "cloudflare")
+		if got.CertResolver != testResolver {
+			t.Errorf("CertResolver = %q, want %q", got.CertResolver, testResolver)
 		}
 		if !got.EnableTLS {
 			t.Error("EnableTLS should be true when CertResolver is set")
@@ -970,7 +971,7 @@ func TestRedirectEntrypointCountsInTheConflict(t *testing.T) {
 	domains["1"] = append(domains["1"], enabledDomain("shop.example.com"))
 	domains["2"] = append(domains["2"], enabledDomain("shop.example.com"))
 	p := routingProvider(t, newCatalog(server, []ForgeSite{owner, peer}, domains, nil))
-	p.defaultCertResolver = "cloudflare"
+	p.defaultCertResolver = testResolver
 	p.httpRedirect = true
 	cfg, err := p.GenerateConfiguration()
 	if err != nil {
@@ -981,6 +982,58 @@ func TestRedirectEntrypointCountsInTheConflict(t *testing.T) {
 	}
 	if cfg.HTTP.Routers["forge-2-shop.example.com"] != nil {
 		t.Fatal("plain-HTTP peer still publishes the owner's host")
+	}
+}
+
+func TestRedirectWinDoesNotBlankEntrypoints(t *testing.T) {
+	server := appServer()
+	lower := namedSite("1", "shop.example.com", []string{"traefik:entrypoints=websecure", "traefik:http-redirect=false", "traefik:tls=true"})
+	higher := namedSite("2", "shop.example.com", nil)
+	domains := map[string][]ForgeDomain{}
+	domains["1"] = append(domains["1"], enabledDomain("shop.example.com"))
+	domains["2"] = append(domains["2"], enabledDomain("shop.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{lower, higher}, domains, nil))
+	p.defaultCertResolver = testResolver
+	p.httpRedirect = true
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, router := range cfg.HTTP.Routers {
+		if len(router.EntryPoints) == 0 {
+			t.Fatalf("router %s has no entry points", name)
+		}
+	}
+	if cfg.HTTP.Routers["forge-1-shop.example.com"] == nil {
+		t.Fatal("lower id lost websecure")
+	}
+	if cfg.HTTP.Routers["forge-2-shop.example.com-http"] == nil {
+		t.Fatal("redirect router was removed from the site that won web")
+	}
+}
+
+func TestOneContestedHostDoesNotDropOtherRedirects(t *testing.T) {
+	server := appServer()
+	apex := namedSite("2", "example.com", nil)
+	alias := namedSite("1", "other.example.com", []string{"traefik:tls=false", "traefik:aliases=www.example.com"})
+	apexDomain := enabledDomain("example.com")
+	apexDomain.Attributes.WWWRedirectType = "to-www"
+	domains := map[string][]ForgeDomain{}
+	domains["2"] = append(domains["2"], apexDomain)
+	domains["1"] = append(domains["1"], enabledDomain("other.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{alias, apex}, domains, nil))
+	p.defaultCertResolver = testResolver
+	p.httpRedirect = true
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect := cfg.HTTP.Routers["forge-2-example.com-http"]
+	if redirect == nil {
+		t.Fatal("uncontested apex lost its HTTP redirect")
+	}
+	if !strings.Contains(redirect.Rule, "Host(`example.com`)") {
+		t.Fatalf("redirect rule = %s", redirect.Rule)
 	}
 }
 

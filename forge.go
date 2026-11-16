@@ -1012,39 +1012,96 @@ func dropContestedHosts(configuration *dynamic.Configuration) {
 // trimLostEntryPoints removes entry points a site lost while still winning
 // another one, and deletes its HTTP redirect router when it lost `web`.
 func trimLostEntryPoints(configuration *dynamic.Configuration, claims map[string][]hostClaim) {
-	for _, list := range claims {
+	for host, list := range claims {
 		if len(list) < 2 {
 			continue
 		}
 		winnerOf := entryPointWinners(list)
 		for _, c := range list {
-			var lost []string
-			won := false
+			var wonEPs []string
 			for _, ep := range c.eps {
 				if winnerOf[ep] == c.siteID {
-					won = true
-					continue
+					wonEPs = append(wonEPs, ep)
 				}
-				lost = append(lost, ep)
 			}
-			if !won || len(lost) == 0 {
+			if len(wonEPs) == 0 || len(wonEPs) == len(c.eps) {
 				continue
 			}
 			router := configuration.HTTP.Routers[c.router]
-			if router != nil {
-				kept := make([]string, 0, len(router.EntryPoints))
-				for _, ep := range router.EntryPoints {
-					if !slices.Contains(lost, ep) {
-						kept = append(kept, ep)
-					}
-				}
-				router.EntryPoints = kept
+			if router == nil {
+				continue
 			}
-			if slices.Contains(lost, "web") {
-				delete(configuration.HTTP.Routers, c.router+"-http")
+			mainKept := make([]string, 0, len(router.EntryPoints))
+			for _, ep := range router.EntryPoints {
+				if slices.Contains(wonEPs, ep) {
+					mainKept = append(mainKept, ep)
+				}
+			}
+			raw := hostSpelling(router.Rule, host)
+			httpName := c.router + "-http"
+			if len(exactHosts(router.Rule)) <= 1 {
+				// One host. Never leave the router with an empty entry-point
+				// list: Traefik would attach it to every default entry point.
+				if len(mainKept) == 0 {
+					delete(configuration.HTTP.Routers, c.router)
+				} else {
+					router.EntryPoints = mainKept
+				}
+				if !slices.Contains(wonEPs, "web") {
+					delete(configuration.HTTP.Routers, httpName)
+				}
+				continue
+			}
+			// Several hosts share this router. Take only the contested host
+			// off it, and leave the other hosts and their redirect router.
+			src := *router
+			var httpCopy *dynamic.Router
+			if httpRouter := configuration.HTTP.Routers[httpName]; httpRouter != nil {
+				cp := *httpRouter
+				httpCopy = &cp
+			}
+			stripHost(configuration, c.router, host)
+			stripHost(configuration, httpName, host)
+			split := c.router + "--" + strings.ReplaceAll(host, ".", "-")
+			if len(mainKept) > 0 {
+				nr := src
+				nr.Rule = "Host(`" + raw + "`)"
+				nr.EntryPoints = mainKept
+				configuration.HTTP.Routers[split] = &nr
+			}
+			if httpCopy != nil && slices.Contains(wonEPs, "web") && !slices.Contains(mainKept, "web") {
+				hr := *httpCopy
+				hr.Rule = "Host(`" + raw + "`)"
+				hr.EntryPoints = []string{"web"}
+				configuration.HTTP.Routers[split+"-http"] = &hr
 			}
 		}
 	}
+}
+
+func stripHost(configuration *dynamic.Configuration, routerName, host string) {
+	router := configuration.HTTP.Routers[routerName]
+	if router == nil {
+		return
+	}
+	rule, changed := ruleWithoutHosts(router.Rule, map[string]bool{host: true})
+	if !changed {
+		return
+	}
+	if rule == "" {
+		delete(configuration.HTTP.Routers, routerName)
+		return
+	}
+	router.Rule = rule
+}
+
+func hostSpelling(rule, canonical string) string {
+	for _, host := range exactHosts(rule) {
+		if claimHost(host) == canonical {
+			return host
+		}
+	}
+	return canonical
 }
 
 func entryPointWinners(list []hostClaim) map[string]string {
