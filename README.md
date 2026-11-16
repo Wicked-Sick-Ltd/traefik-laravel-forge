@@ -249,7 +249,7 @@ If a site has Reverb configured in Forge, the plugin automatically:
 3. Applies the same TLS settings as the main router
 4. **No HTTP→HTTPS redirect** for the Reverb router — WebSocket clients don't follow redirects
 
-The Reverb router is created even when the site has no main router (for example, when its only other domain is `.on-forge.com`). It is published at one priority above a normal router for that hostname, so another site's alias or domain record for the same name does not take the WebSocket host.
+The Reverb router is created even when the site has no main router (for example, when its only other domain is `.on-forge.com`). A hostname that more than one site publishes is left off every router, with a log line, so a Reverb record cannot capture another site's name by priority.
 
 Nginx handles the WebSocket proxy to the Reverb process internally, using the location block Forge creates when you enable Reverb. Traefik only needs to route the Reverb domain to Nginx.
 

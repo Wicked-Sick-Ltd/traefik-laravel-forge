@@ -743,8 +743,8 @@ func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
 		if reverbRouter == nil {
 			t.Fatal("reverb router was not published")
 		}
-		if reverbRouter.Priority != domainPriority("ws.example.com")+1 {
-			t.Errorf("reverb priority = %d, want %d", reverbRouter.Priority, domainPriority("ws.example.com")+1)
+		if reverbRouter.Priority != domainPriority("ws.example.com") {
+			t.Errorf("reverb priority = %d, want %d", reverbRouter.Priority, domainPriority("ws.example.com"))
 		}
 		if cfg.HTTP.Services["forge-example.com-site1-service"] == nil {
 			t.Fatal("service was not created for the reverb-only site")
@@ -764,9 +764,10 @@ func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
 	})
 }
 
-// TestReverbRouterOutranksPeerAlias checks that the owning site's Reverb
-// router beats another site's router for the same hostname.
-func TestReverbRouterOutranksPeerAlias(t *testing.T) {
+// TestContestedHostIsPublishedOnNoSite drops a hostname that two sites both
+// publish, including a Reverb host another site also aliases. Neither router
+// keeps the name, so a Reverb record cannot capture someone else's host.
+func TestContestedHostIsPublishedOnNoSite(t *testing.T) {
 	server := ForgeServer{ID: "s1"}
 	server.Type = "servers"
 	server.Attributes.Name = "app01"
@@ -784,13 +785,11 @@ func TestReverbRouterOutranksPeerAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := cfg.HTTP.Routers["forge-owner-ws.example.com"]
-	peer := cfg.HTTP.Routers["forge-peer-ws.example.com"]
-	if owner == nil || peer == nil {
-		t.Fatalf("owner=%v peer=%v", owner != nil, peer != nil)
+	if cfg.HTTP.Routers["forge-owner-ws.example.com"] != nil || cfg.HTTP.Routers["forge-peer-ws.example.com"] != nil {
+		t.Fatal("contested host was still published")
 	}
-	if owner.Priority <= peer.Priority {
-		t.Errorf("reverb priority %d does not beat peer priority %d", owner.Priority, peer.Priority)
+	if cfg.HTTP.Routers["forge-owner-shop.example.com"] == nil || cfg.HTTP.Routers["forge-peer-other.example.com"] == nil {
+		t.Fatal("uncontested hosts were dropped with the contested one")
 	}
 }
 

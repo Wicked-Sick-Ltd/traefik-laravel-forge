@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -373,6 +374,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 			return nil, err
 		}
 	}
+	dropContestedHosts(configuration)
 
 	return configuration, nil
 }
@@ -598,12 +600,6 @@ func (p *Provider) processSite(
 	for _, rd := range reverbDomains {
 		if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
 			routersCreated++
-			// One above a normal router for the same hostname, so another site's
-			// alias or domain record does not take the Reverb host on a tie.
-			routerName := fmt.Sprintf("forge-%s-%s", site.ID, rd.Attributes.Name)
-			if r := configuration.HTTP.Routers[routerName]; r != nil {
-				r.Priority = domainPriority(rd.Attributes.Name) + 1
-			}
 			pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
 				site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
 		}
@@ -913,6 +909,94 @@ func buildHostRule(hosts, wildcardHosts []string) string {
 // always outrank parent wildcard rules regardless of rule string length.
 func domainPriority(domain string) int {
 	return (strings.Count(domain, ".") + 1) * 100
+}
+
+// dropContestedHosts removes a hostname from every router when more than one
+// site published it. A priority bump would let a Reverb record capture another
+// site's real name; leaving the tie would let router order decide. The host
+// stays unpublished until only one site asks for it.
+func dropContestedHosts(configuration *dynamic.Configuration) {
+	if configuration == nil || configuration.HTTP == nil {
+		return
+	}
+	users := map[string][]string{}
+	for name, router := range configuration.HTTP.Routers {
+		if strings.HasSuffix(name, "-http") || router == nil {
+			continue
+		}
+		for _, host := range hostLiterals(router.Rule) {
+			users[host] = append(users[host], name)
+		}
+	}
+	contested := map[string]bool{}
+	for host, names := range users {
+		if len(names) < 2 {
+			continue
+		}
+		contested[host] = true
+		sort.Strings(names)
+		pluginLog.Printf("Host %q is claimed by routers %s; publishing it on none of them",
+			host, strings.Join(names, ", "))
+	}
+	if len(contested) == 0 {
+		return
+	}
+	for name, router := range configuration.HTTP.Routers {
+		if router == nil {
+			continue
+		}
+		rule, changed := ruleWithoutHosts(router.Rule, contested)
+		if !changed {
+			continue
+		}
+		if rule == "" {
+			delete(configuration.HTTP.Routers, name)
+			continue
+		}
+		router.Rule = rule
+	}
+}
+
+func hostLiterals(rule string) []string {
+	var hosts []string
+	rest := rule
+	const marker = "Host(`"
+	for {
+		i := strings.Index(rest, marker)
+		if i < 0 {
+			return hosts
+		}
+		rest = rest[i+len(marker):]
+		end := strings.Index(rest, "`)")
+		if end < 0 {
+			return hosts
+		}
+		hosts = append(hosts, rest[:end])
+		rest = rest[end+2:]
+	}
+}
+
+func ruleWithoutHosts(rule string, drop map[string]bool) (string, bool) {
+	parts := strings.Split(rule, " || ")
+	kept := make([]string, 0, len(parts))
+	changed := false
+	for _, part := range parts {
+		host, ok := exactHostPart(part)
+		if ok && drop[host] {
+			changed = true
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, " || "), changed
+}
+
+func exactHostPart(part string) (string, bool) {
+	part = strings.TrimSpace(part)
+	if !strings.HasPrefix(part, "Host(`") || !strings.HasSuffix(part, "`)") {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(part, "Host(`"), "`)"), true
 }
 
 func boolPtr(v bool) *bool { return &v }

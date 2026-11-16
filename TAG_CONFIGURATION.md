@@ -228,7 +228,7 @@ If the Forge Reverb integration is enabled for a site (Sites → your site → I
 
 The Reverb router has no HTTP→HTTPS redirect (WebSocket clients don't follow redirects). All other settings (TLS, middlewares, entry points) match the main site.
 
-The Reverb router is created whenever the Reverb host has an enabled domain record, even if the site has no main router (for example, its only other domain is `.on-forge.com`). Leaving it out would make Traefik delete the router and free the hostname for another site's alias or domain record. The router is one priority above `domainPriority` for that hostname, so a peer site that publishes the same name as an alias or a domain record does not win the tie.
+The Reverb router is created whenever the Reverb host has an enabled domain record, even if the site has no main router (for example, its only other domain is `.on-forge.com`). Leaving it out would make Traefik delete the router. If another site also publishes that hostname, the plugin removes it from every router and logs the router names. The host comes back when only one site asks for it.
 
 ---
 
