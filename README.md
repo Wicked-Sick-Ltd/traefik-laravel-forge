@@ -186,7 +186,7 @@ Add these to any site in Forge to control how it's routed:
 | `traefik:entrypoints` | `traefik:entrypoints=websecure,web` | Override entry points (comma-separated) |
 | `traefik:aliases` | `traefik:aliases=app.example.com,www.example.com` | Add extra hostnames to the router rule (comma-separated) |
 | `traefik:middlewares` | `traefik:middlewares=my-auth,rate-limit` | Attach named Traefik middlewares to this site's router (comma-separated). Middlewares must be defined in static config. Applied to the main and Reverb routers; not the HTTP redirect router |
-| `traefik:forge-domain` | `traefik:forge-domain=true` | Opt `.on-forge.com` domains into routing. Without this, `.on-forge.com`-only sites are skipped entirely; mixed-domain sites have the `.on-forge.com` entry dropped. When opted in, TLS is disabled for `.on-forge.com` domains |
+| `traefik:forge-domain` | `traefik:forge-domain=true` | Opt `.on-forge.com` domains into routing. Without this, `.on-forge.com` entries are dropped before the site-name fallback; a site whose only other name is its Reverb host still gets its Reverb router. When opted in, TLS is disabled for `.on-forge.com` domains |
 
 ### Server tags
 
@@ -220,7 +220,7 @@ The plugin fetches all domain records for each site. Domain types:
 - `alias` — additional domains, included in the Host() rule
 - `reverb` — Laravel Reverb WebSocket domain, gets its own router (see below)
 
-**`.on-forge.com` domains are excluded by default.** Forge assigns every site an `.on-forge.com` subdomain, but Forge controls DNS and TLS for these — the plugin can't obtain certs for them and their DNS may not point to your load balancer. Sites where `.on-forge.com` is the only domain are skipped entirely. Use `traefik:forge-domain=true` to opt in (routes HTTP only, no TLS).
+**`.on-forge.com` domains are excluded by default.** Forge assigns every site an `.on-forge.com` subdomain, but Forge controls DNS and TLS for these — the plugin can't obtain certs for them and their DNS may not point to your load balancer. They are dropped before the plugin decides whether a site has a main domain, so a site with no other main domain falls back to its Forge site name (and gets no main router if that name is itself `.on-forge.com`). Its Reverb router is still created. Use `traefik:forge-domain=true` to opt in (routes HTTP only, no TLS).
 
 If a primary domain has **wildcard subdomains enabled** in Forge, a `HostRegexp` clause is automatically appended:
 
@@ -248,6 +248,8 @@ If a site has Reverb configured in Forge, the plugin automatically:
 2. Creates a **separate router** for the Reverb domain, pointing to Nginx on port 80
 3. Applies the same TLS settings as the main router
 4. **No HTTP→HTTPS redirect** for the Reverb router — WebSocket clients don't follow redirects
+
+The Reverb router is created even when the site has no main router (for example, when its only other domain is `.on-forge.com`), so the Reverb hostname stays on the site that owns the integration.
 
 Nginx handles the WebSocket proxy to the Reverb process internally, using the location block Forge creates when you enable Reverb. Traefik only needs to route the Reverb domain to Nginx.
 

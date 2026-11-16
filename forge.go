@@ -549,7 +549,14 @@ func (p *Provider) processSite(
 
 	mainDomains, reverbDomains := classifyDomains(domains, reverbHost)
 
-	// Fallback: no Forge domain records → synthesize one from the site name.
+	// Drop .on-forge.com names before deciding whether the site has a main
+	// domain. createDomainRouter would discard them anyway, and leaving them in
+	// would suppress the site-name fallback below.
+	if !tags.IncludeForgeDomain {
+		mainDomains = withoutForgeDefaultDomains(mainDomains)
+	}
+
+	// Fallback: no routable Forge domain records → synthesize one from the site name.
 	if len(mainDomains) == 0 {
 		mainDomains = []ForgeDomain{{
 			Attributes: ForgeDomainAttributes{
@@ -580,6 +587,21 @@ func (p *Provider) processSite(
 		}
 	}
 
+	// Reverb domains route through the same Nginx backend as the main site.
+	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
+	// HTTP redirect is suppressed — WebSocket clients don't follow redirects.
+	// They are built even when no main router was: a poll that omits the Reverb
+	// host makes Traefik delete its router and frees the name for another site.
+	noRedirectTags := tags
+	noRedirectTags.HTTPRedirect = false
+	for _, rd := range reverbDomains {
+		if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
+			routersCreated++
+			pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+				site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
+		}
+	}
+
 	if routersCreated == 0 {
 		return nil
 	}
@@ -593,21 +615,23 @@ func (p *Provider) processSite(
 
 	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
 
-	// Reverb domains route through the same Nginx backend as the main site.
-	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
-	// HTTP redirect is suppressed — WebSocket clients don't follow redirects.
-	if len(reverbDomains) > 0 {
-		noRedirectTags := tags
-		noRedirectTags.HTTPRedirect = false
-		for _, rd := range reverbDomains {
-			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
-				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
-					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
-			}
+	return nil
+}
+
+// isForgeDefaultDomain reports whether name is a Forge-managed *.on-forge.com host.
+func isForgeDefaultDomain(name string) bool {
+	return strings.HasSuffix(name, ".on-forge.com")
+}
+
+// withoutForgeDefaultDomains returns domains with every *.on-forge.com record removed.
+func withoutForgeDefaultDomains(domains []ForgeDomain) []ForgeDomain {
+	kept := make([]ForgeDomain, 0, len(domains))
+	for _, d := range domains {
+		if !isForgeDefaultDomain(d.Attributes.Name) {
+			kept = append(kept, d)
 		}
 	}
-
-	return nil
+	return kept
 }
 
 // createDomainRouter creates a Traefik router for a single Forge domain record,
@@ -624,7 +648,7 @@ func (p *Provider) createDomainRouter(
 	name := domain.Attributes.Name
 
 	// .on-forge.com domains are skipped unless the site opted in.
-	if strings.HasSuffix(name, ".on-forge.com") {
+	if isForgeDefaultDomain(name) {
 		if !tags.IncludeForgeDomain {
 			pluginLog.Printf("Skipping .on-forge.com domain %q (use traefik:forge-domain=true to include)", name)
 			return false
