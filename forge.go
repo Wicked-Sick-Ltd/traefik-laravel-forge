@@ -547,6 +547,12 @@ func privateNetworkIP(host string) net.IP {
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
+	// fd00:ec2::254 is inside fc00::/7, so IsPrivate is true, but it is the
+	// EC2 IPv6 instance-metadata address. The IPv4 metadata address is already
+	// refused because it is link-local.
+	if ip.Equal(net.ParseIP("fd00:ec2::254")) {
+		return nil
+	}
 	if ip.IsPrivate() || ip.IsLoopback() {
 		return ip
 	}

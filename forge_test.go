@@ -666,6 +666,7 @@ func TestPrivateNetworkIP(t *testing.T) {
 		{"192.168.1.9", "192.168.1.9"},
 		{"127.0.0.1", "127.0.0.1"},
 		{"fd00::5", "fd00::5"},
+		{"fd00:ec2::254", ""},
 		{"::1", "::1"},
 		{"::ffff:10.0.0.1", "10.0.0.1"},
 		{"203.0.113.10", ""},
@@ -778,6 +779,29 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 		}
 		if len(cfg.HTTP.Services) != 0 {
 			t.Fatal("https origin used an IP literal, which the certificate cannot cover")
+		}
+	})
+
+	t.Run("EC2 IPv6 metadata address is not published", func(t *testing.T) {
+		for _, tag := range []string{
+			"traefik:upstream-host=fd00:ec2::254",
+			"traefik:upstream-host=[fd00:ec2::254]",
+		} {
+			srv := public
+			srv.Attributes.IPAddress = ""
+			srv.Attributes.PrivateIPAddress = ""
+			srv.Attributes.Tags = []string{tag}
+			p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := p.GenerateConfiguration()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.HTTP.Services) != 0 {
+				t.Fatalf("%s was published", tag)
+			}
 		}
 	})
 

@@ -135,7 +135,9 @@ The default service URL is `http://`, and Traefik has already terminated client 
 so the hop to the origin carries cookies and request bodies in the clear.
 `processServer` therefore publishes a cleartext server only when its resolved
 upstream (tag, mapping, or Forge auto-detection) parses as a private or loopback
-IP literal (`privateNetworkIP`), or falls in `cleartextCIDRs`. Public IPs,
+IP literal (`privateNetworkIP`), or falls in `cleartextCIDRs`. The EC2 IPv6
+instance-metadata address is refused even though it sits inside `fc00::/7`.
+Public IPs,
 link-local, CGNAT, and hostnames are skipped with a log line, and there is no
 fallback to Forge's public `ip_address`.
 
