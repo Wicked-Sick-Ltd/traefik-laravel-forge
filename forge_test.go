@@ -1037,6 +1037,32 @@ func TestOneContestedHostDoesNotDropOtherRedirects(t *testing.T) {
 	}
 }
 
+func TestWildcardSurvivesApexContest(t *testing.T) {
+	server := appServer()
+	owner := namedSite("2", "example.com", nil)
+	peer := namedSite("1", "other.example.com", []string{"traefik:tls=false", "traefik:aliases=example.com"})
+	wild := enabledDomain("example.com")
+	wild.Attributes.AllowWildcardSubdomains = true
+	domains := map[string][]ForgeDomain{}
+	domains["2"] = append(domains["2"], wild)
+	domains["1"] = append(domains["1"], enabledDomain("other.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{peer, owner}, domains, nil))
+	p.defaultCertResolver = testResolver
+	p.httpRedirect = true
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := cfg.HTTP.Routers["forge-2-example.com"]
+	redirect := cfg.HTTP.Routers["forge-2-example.com-http"]
+	if parent == nil || !strings.Contains(parent.Rule, "HostRegexp") {
+		t.Fatalf("wildcard router = %v", parent)
+	}
+	if redirect == nil || !strings.Contains(redirect.Rule, "HostRegexp") {
+		t.Fatalf("wildcard redirect = %v", redirect)
+	}
+}
+
 func TestStopIsSafeAndIdempotent(t *testing.T) {
 	p, err := NewProviderWithClient(&Config{PollInterval: "30s"}, stubClient{})
 	if err != nil {

@@ -1039,7 +1039,7 @@ func trimLostEntryPoints(configuration *dynamic.Configuration, claims map[string
 			}
 			raw := hostSpelling(router.Rule, host)
 			httpName := c.router + "-http"
-			if len(exactHosts(router.Rule)) <= 1 {
+			if ruleIsOnlyHost(router.Rule, host) {
 				// One host. Never leave the router with an empty entry-point
 				// list: Traefik would attach it to every default entry point.
 				if len(mainKept) == 0 {
@@ -1069,7 +1069,9 @@ func trimLostEntryPoints(configuration *dynamic.Configuration, claims map[string
 				nr.EntryPoints = mainKept
 				configuration.HTTP.Routers[split] = &nr
 			}
-			if httpCopy != nil && slices.Contains(wonEPs, "web") && !slices.Contains(mainKept, "web") {
+			// The copied main router still has TLS, so it does not answer on web.
+			// The redirect sibling does. Build it whenever this site won web.
+			if httpCopy != nil && slices.Contains(wonEPs, "web") {
 				hr := *httpCopy
 				hr.Rule = "Host(`" + raw + "`)"
 				hr.EntryPoints = []string{"web"}
@@ -1093,6 +1095,15 @@ func stripHost(configuration *dynamic.Configuration, routerName, host string) {
 		return
 	}
 	router.Rule = rule
+}
+
+func ruleIsOnlyHost(rule, canonical string) bool {
+	parts := strings.Split(rule, " || ")
+	if len(parts) != 1 {
+		return false
+	}
+	host, ok := exactHostPart(parts[0])
+	return ok && claimHost(host) == canonical
 }
 
 func hostSpelling(rule, canonical string) string {
