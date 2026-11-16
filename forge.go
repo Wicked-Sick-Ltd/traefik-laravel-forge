@@ -551,6 +551,7 @@ type sitePlan struct {
 	routes      []hostRoute
 	reverb      []hostRoute
 	claims      map[string]bool
+	explicit    map[string]bool // a domain record or alias named the host, exact or not
 	domainExact map[string]bool // exact claim came from a domain record, not an alias
 }
 
@@ -559,6 +560,10 @@ func (s *sitePlan) claim(r hostRoute) {
 		// An explicit record or alias can upgrade a weaker claim. It must not
 		// downgrade one that was already exact.
 		s.claims[r.host] = s.claims[r.host] || r.exact
+		if s.explicit == nil {
+			s.explicit = map[string]bool{}
+		}
+		s.explicit[r.host] = true
 		if r.fromDomain && r.exact {
 			if s.domainExact == nil {
 				s.domainExact = map[string]bool{}
@@ -639,6 +644,7 @@ func (p *Provider) planSite(
 		serviceName: fmt.Sprintf("forge-%s-%s-service", site.Attributes.Name, site.ID),
 		backendURL:  fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port),
 		claims:      map[string]bool{},
+		explicit:    map[string]bool{},
 		domainExact: map[string]bool{},
 	}
 
@@ -765,11 +771,27 @@ func (p *Provider) resolveHostOwners(plans []sitePlan) map[string]string {
 			owners[host] = owner
 		}
 	}
-	// An implied www host follows the site that won its apex, unless an
-	// explicit www record already took it. Otherwise two exact apexes with
-	// www redirects leave www unpublished.
+	// An implied www host follows the apex winner only when nobody else named
+	// that www host in a record or alias. One explicit claim, even spelled
+	// non-canonically, wins instead. Two explicit non-canonical claims stay
+	// unpublished, which is the same rule as any other inexact tie.
 	for host, idx := range claimants {
 		if _, ok := owners[host]; ok || !strings.HasPrefix(host, "www.") {
+			continue
+		}
+		var explicit []int
+		for _, i := range idx {
+			if plans[i].explicit[host] {
+				explicit = append(explicit, i)
+			}
+		}
+		if len(explicit) == 1 {
+			owners[host] = plans[explicit[0]].key
+			fmt.Fprintf(os.Stderr, "forge: host %q is spelled non-canonically only by site %q\n",
+				host, plans[explicit[0]].name)
+			continue
+		}
+		if len(explicit) > 1 {
 			continue
 		}
 		apexOwner, ok := owners[strings.TrimPrefix(host, "www.")]

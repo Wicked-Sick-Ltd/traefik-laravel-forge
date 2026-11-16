@@ -906,6 +906,32 @@ func TestExactApexTieKeepsWWWWithTheApex(t *testing.T) {
 	}
 }
 
+func TestExplicitNonCanonicalWWWBeatsImpliedRedirect(t *testing.T) {
+	p := ownedProvider(t, catalogForge{
+		servers: []ForgeServer{{
+			ID: "s1", Type: "servers",
+			Attributes: ForgeServerAttributes{Name: "app01", PrivateIPAddress: "10.0.0.1"},
+		}},
+		sites: map[string][]ForgeSite{
+			"s1": {installedSite("apex", "example.com"), installedSite("wwwsite", "www.example.com")},
+		},
+		domains: map[string][]ForgeDomain{
+			"apex":    {domainRecord("example.com", "to-www")},
+			"wwwsite": {domainRecord("WWW.Example.com", "")},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ruleHas(routerRule(cfg, "forge-apex-example.com"), "www.example.com") {
+		t.Fatal("implied www redirect took an explicit www record")
+	}
+	if !ruleHas(routerRule(cfg, "forge-wwwsite-www.example.com"), "www.example.com") {
+		t.Fatal("non-canonical explicit www record was not routed")
+	}
+}
+
 func TestDomainRecordBeatsLowerAlias(t *testing.T) {
 	alias := installedSite("a", "other.example.com")
 	alias.Attributes.Tags = []string{"traefik:aliases=shop.example.com"}
