@@ -859,6 +859,33 @@ func TestAliasRuleInjectionIsIgnored(t *testing.T) {
 	}
 }
 
+func TestParentWildcardDoesNotCaptureKeptExactHost(t *testing.T) {
+	server := appServer()
+	exact := namedSite("a", "shop.example.com", nil)
+	wild := namedSite("b", "example.com", nil)
+	wildDomain := enabledDomain("example.com")
+	wildDomain.Attributes.AllowWildcardSubdomains = true
+	domains := map[string][]ForgeDomain{}
+	domains["a"] = append(domains["a"], enabledDomain("shop.example.com"))
+	domains["b"] = append(domains["b"], wildDomain)
+	p := routingProvider(t, newCatalog(server, []ForgeSite{exact, wild}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := cfg.HTTP.Routers["forge-a-shop.example.com"]
+	parent := cfg.HTTP.Routers["forge-b-example.com"]
+	if child == nil || parent == nil {
+		t.Fatalf("child=%v parent=%v", child != nil, parent != nil)
+	}
+	if !strings.Contains(child.Rule, "Host(`shop.example.com`)") {
+		t.Fatalf("exact router lost its host: %s", child.Rule)
+	}
+	if child.Priority <= parent.Priority {
+		t.Fatalf("exact priority %d does not beat wildcard priority %d", child.Priority, parent.Priority)
+	}
+}
+
 func TestStopIsSafeAndIdempotent(t *testing.T) {
 	p, err := NewProviderWithClient(&Config{PollInterval: "30s"}, stubClient{})
 	if err != nil {
