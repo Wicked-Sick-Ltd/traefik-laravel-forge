@@ -128,6 +128,7 @@ That's all that's needed. The plugin discovers your servers and sites automatica
 | `redirectMiddleware` | string | `""` | Name of an externally-defined redirect middleware to use. If empty and `httpRedirect` is `true`, the plugin creates `forge-https-redirect` automatically |
 | `traefikID` | string | `""` | When set, only process servers tagged `traefik:traefik-id=<value>`. Use this in multi-LB setups so each Traefik instance only routes its own servers. Servers with no matching tag are skipped |
 | `serverMappings` | array | `[]` | Optional: explicitly set the upstream host/port for specific servers (tags take priority over this) |
+| `allowedSitePorts` | array of int | `[]` | Ports a `traefik:port` site tag may select. A site tag naming any other port is ignored and logged. Empty means site tags cannot change the port |
 
 ### serverMappings
 
@@ -181,7 +182,7 @@ Add these to any site in Forge to control how it's routed:
 | `traefik:enabled` | `traefik:enabled=false` | Enable or disable routing for this site. Useful with `defaultSitesEnabled: false` |
 | `traefik:cert-resolver` | `traefik:cert-resolver=letsencrypt` | Override the cert resolver for this site |
 | `traefik:tls` | `traefik:tls=true` | Force TLS on or off regardless of `defaultCertResolver` |
-| `traefik:port` | `traefik:port=8080` | Override the backend port for this site |
+| `traefik:port` | `traefik:port=8080` | Override the backend port for this site. Only ports listed in `allowedSitePorts` are honoured |
 | `traefik:http-redirect` | `traefik:http-redirect=false` | Override the global `httpRedirect` setting for this site |
 | `traefik:entrypoints` | `traefik:entrypoints=websecure,web` | Override entry points (comma-separated) |
 | `traefik:aliases` | `traefik:aliases=app.example.com,www.example.com` | Add extra hostnames to the router rule (comma-separated) |
@@ -245,7 +246,7 @@ This applies in both redirect directions — Traefik must route `www.example.com
 If a site has Reverb configured in Forge, the plugin automatically:
 
 1. Fetches the Reverb host from `/integrations/reverb`
-2. Creates a **separate router** for the Reverb domain, pointing to Nginx on port 80
+2. Creates a **separate router** for the Reverb domain, pointing to Nginx on the server's upstream port (80 by default), even when the site has a `traefik:port` override
 3. Applies the same TLS settings as the main router
 4. **No HTTP→HTTPS redirect** for the Reverb router — WebSocket clients don't follow redirects
 
@@ -300,7 +301,7 @@ go run ./cmd/verify ... --dump
 go run ./cmd/verify ... --json
 ```
 
-Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`.
+Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`, `--traefik-id`, `--allowed-site-ports` (comma-separated).
 
 ## Troubleshooting
 
@@ -353,6 +354,9 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
 - Values must be whole numbers in the range 1–65535. Anything else (`-1`, `80x`,
   `999999`) is rejected and the default is used, with a line in the Traefik log
   naming the offending value.
+- A `traefik:port` site tag must also name a port listed in `allowedSitePorts`
+  (or the server's own upstream port). Otherwise the log reads
+  `Ignoring traefik:port=<port>: not in allowedSitePorts`.
 
 ## API rate limits
 

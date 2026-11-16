@@ -129,6 +129,14 @@ trigger "Too many attempts" across the whole token. If Forge starts returning 42
 check the *other* tools sharing the token before suspecting this plugin — grep for
 `api/v1` across the fleet. Confirmed with Forge support, September 2026.
 
+## Site tags do not choose where the load balancer dials
+
+Anyone who can tag one site in Forge controls that site's tags, so a site tag must
+not widen what the load balancer connects to. `traefik:port` only takes effect for a
+port in the operator's `allowedSitePorts` (or the server's own upstream port), and
+Reverb routers always stay on the server's Nginx port. Keep that rule when adding a
+site tag that touches the backend address.
+
 ## Local toolchain
 
 `go.mod` and both CI workflows pin **Go 1.22**. On a machine running a newer Go, both

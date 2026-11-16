@@ -66,6 +66,10 @@ providers:
       # Set to false for opt-in mode: only sites tagged traefik:enabled=true are routed.
       # defaultSitesEnabled: true
 
+      # Optional: ports a traefik:port site tag may select. A site tag naming any
+      # other port is ignored and logged. Leave unset unless an app needs it.
+      # allowedSitePorts: [3000, 8080]
+
       # Optional: override IP or port for specific servers.
       # Usually not needed — the plugin auto-detects private IPs from Forge.
       # serverMappings:

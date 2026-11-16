@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ type Config struct {
 	RedirectMiddleware  string          `json:"redirectMiddleware,omitempty"`
 	TraefikID           string          `json:"traefikID,omitempty"`
 	ServerMappings      []ServerMapping `json:"serverMappings,omitempty"`
+	AllowedSitePorts    []int           `json:"allowedSitePorts,omitempty"`
 }
 
 // CreateConfig creates the default plugin configuration.
@@ -146,6 +148,7 @@ type Provider struct {
 	redirectMiddleware  string
 	traefikID           string
 	serverMappings      []ServerMapping
+	allowedSitePorts    []int
 	client              ForgeClient
 
 	cacheTTL time.Duration
@@ -182,6 +185,7 @@ func NewProviderWithClient(config *Config, client ForgeClient) (*Provider, error
 		redirectMiddleware:  config.RedirectMiddleware,
 		traefikID:           config.TraefikID,
 		serverMappings:      config.ServerMappings,
+		allowedSitePorts:    config.AllowedSitePorts,
 		client:              client,
 	}, nil
 }
@@ -218,6 +222,7 @@ func New(_ context.Context, config *Config, name string) (*Provider, error) {
 		redirectMiddleware:  config.RedirectMiddleware,
 		traefikID:           config.TraefikID,
 		serverMappings:      config.ServerMappings,
+		allowedSitePorts:    config.AllowedSitePorts,
 		client:              newForgeHTTPClient(config.APIToken, config.Organization),
 	}, nil
 }
@@ -232,6 +237,11 @@ func (p *Provider) Init() error {
 	}
 	if p.cacheTTL < 0 {
 		return fmt.Errorf("cacheTTL must not be negative, got %s", p.cacheTTL)
+	}
+	for _, port := range p.allowedSitePorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("allowedSitePorts entries must be 1-65535, got %d", port)
+		}
 	}
 	return nil
 }
@@ -528,6 +538,7 @@ func (p *Provider) processSite(
 		SitesEnabled: p.defaultSitesEnabled,
 		HTTPRedirect: p.httpRedirect,
 		Port:         upstreamPort,
+		AllowedPorts: p.allowedSitePorts,
 	}
 	tags := parseSiteTags(site.Attributes.Tags, defaults)
 
@@ -593,16 +604,32 @@ func (p *Provider) processSite(
 
 	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
 
-	// Reverb domains route through the same Nginx backend as the main site.
-	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
+	// Reverb domains route to the server's Nginx, which proxies WebSockets to Reverb
+	// via its Forge-configured location. That is the server upstream port, not a
+	// traefik:port override, so an overridden site gets a separate Nginx service.
 	// HTTP redirect is suppressed — WebSocket clients don't follow redirects.
 	if len(reverbDomains) > 0 {
+		reverbServiceName, reverbBackendURL := serviceName, siteBackendURL
+		if tags.Port != upstreamPort {
+			reverbServiceName = fmt.Sprintf("forge-%s-%s-nginx-service", site.Attributes.Name, site.ID)
+			reverbBackendURL = fmt.Sprintf("http://%s:%d", upstreamHost, upstreamPort)
+		}
 		noRedirectTags := tags
 		noRedirectTags.HTTPRedirect = false
+		reverbRouters := 0
 		for _, rd := range reverbDomains {
-			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
+			if p.createDomainRouter(site.ID, rd, reverbServiceName, noRedirectTags, configuration, redirectMiddlewareName) {
+				reverbRouters++
 				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
-					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
+					site.Attributes.Name, rd.Attributes.Name, reverbBackendURL)
+			}
+		}
+		if reverbRouters > 0 && reverbServiceName != serviceName {
+			configuration.HTTP.Services[reverbServiceName] = &dynamic.Service{
+				LoadBalancer: &dynamic.ServersLoadBalancer{
+					Servers:        []dynamic.Server{{URL: reverbBackendURL}},
+					PassHostHeader: boolPtr(true),
+				},
 			}
 		}
 	}
@@ -728,6 +755,8 @@ type siteDefaults struct {
 	SitesEnabled bool
 	HTTPRedirect bool
 	Port         int
+	// AllowedPorts lists the ports a traefik:port tag may select besides Port.
+	AllowedPorts []int
 }
 
 // siteTagConfig is the resolved configuration for a single site after tag processing.
@@ -767,10 +796,15 @@ func parseSiteTags(tags []string, defaults siteDefaults) siteTagConfig {
 		case "tls":
 			cfg.EnableTLS = value == "true"
 		case "port":
-			if port, ok := parsePort(value); ok {
-				cfg.Port = port
-			} else {
+			port, ok := parsePort(value)
+			switch {
+			case !ok:
 				pluginLog.Printf("Ignoring invalid traefik:port=%q (want 1-65535)", value)
+			case port != defaults.Port && !slices.Contains(defaults.AllowedPorts, port):
+				pluginLog.Printf("Ignoring traefik:port=%d: not in allowedSitePorts, keeping port %d",
+					port, cfg.Port)
+			default:
+				cfg.Port = port
 			}
 		case "http-redirect", "redirect":
 			cfg.HTTPRedirect = value == "true"
