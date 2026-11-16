@@ -57,7 +57,8 @@ providers:
       # Generate HTTP→HTTPS redirect routers on the "web" entry point.
       # When true and redirectMiddleware is empty, the plugin creates
       # a forge-https-redirect middleware automatically.
-      # Sites whose traefik:entrypoints tag omits "web" get no redirect router.
+      # Sites whose traefik:entrypoints tag names neither "web" nor "websecure"
+      # get no redirect router. A tag of only "websecure" still redirects.
       httpRedirect: true
 
       # Optional: reference an externally-defined redirect middleware instead.

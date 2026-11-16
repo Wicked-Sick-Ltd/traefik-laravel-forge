@@ -44,7 +44,7 @@ On each poll the plugin:
 
 Each site produces:
 - A **main router** covering all its primary and alias domains (with `HostRegexp` for wildcard-enabled domains)
-- An **HTTP redirect router** on the `web` entry point (if `httpRedirect` is enabled, the site has TLS, and the site's `traefik:entrypoints` tag is unset or includes `web`)
+- An **HTTP redirect router** on the `web` entry point (if `httpRedirect` is enabled, the site has TLS, and the site's `traefik:entrypoints` tag is unset or includes `web` or `websecure`)
 - A **Reverb router** for the Reverb domain (if Reverb is configured in Forge), routing through Nginx
 
 No `serverMappings` config is required — the plugin discovers everything from Forge automatically.
@@ -183,7 +183,7 @@ Add these to any site in Forge to control how it's routed:
 | `traefik:tls` | `traefik:tls=true` | Force TLS on or off regardless of `defaultCertResolver` |
 | `traefik:port` | `traefik:port=8080` | Override the backend port for this site |
 | `traefik:http-redirect` | `traefik:http-redirect=false` | Override the global `httpRedirect` setting for this site |
-| `traefik:entrypoints` | `traefik:entrypoints=websecure,web` | Override entry points (comma-separated). If the list does not include `web`, no HTTP redirect router is generated, so the site's hostnames stay off port 80 |
+| `traefik:entrypoints` | `traefik:entrypoints=websecure,web` | Override entry points (comma-separated). A list that includes `web` or `websecure` still gets an HTTP redirect router. A list that names only other entry points does not, so those hostnames stay off port 80 |
 | `traefik:aliases` | `traefik:aliases=app.example.com,www.example.com` | Add extra hostnames to the router rule (comma-separated) |
 | `traefik:middlewares` | `traefik:middlewares=my-auth,rate-limit` | Attach named Traefik middlewares to this site's router (comma-separated). Middlewares must be defined in static config. Applied to the main and Reverb routers; not the HTTP redirect router |
 | `traefik:forge-domain` | `traefik:forge-domain=true` | Opt `.on-forge.com` domains into routing. Without this, `.on-forge.com`-only sites are skipped entirely; mixed-domain sites have the `.on-forge.com` entry dropped. When opted in, TLS is disabled for `.on-forge.com` domains |

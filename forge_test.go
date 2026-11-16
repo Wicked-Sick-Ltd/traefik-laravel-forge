@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/traefik/genconf/dynamic"
 )
 
 const (
@@ -643,6 +645,85 @@ func TestResolveUpstream(t *testing.T) {
 			}
 		})
 	}
+}
+
+func emptyHTTPConfig() *dynamic.Configuration {
+	return &dynamic.Configuration{
+		HTTP: &dynamic.HTTPConfiguration{
+			Routers:     map[string]*dynamic.Router{},
+			Services:    map[string]*dynamic.Service{},
+			Middlewares: map[string]*dynamic.Middleware{},
+		},
+	}
+}
+
+// TestHTTPRedirectRouterFollowsPublicEntrypoints pins when the -http router is
+// emitted. websecure is the public TLS entry point, so a site tagged with only
+// that name keeps its redirect. A site tagged with only an internal entry point
+// does not, and a site-level redirect with no global middleware still attaches
+// forge-https-redirect.
+func TestHTTPRedirectRouterFollowsPublicEntrypoints(t *testing.T) {
+	const routerName = "forge-1-example.com"
+
+	t.Run("websecure only keeps the redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			EntryPoints:  []string{httpsEntryPoint},
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "https-redirect")
+		httpRouter := cfg.HTTP.Routers[routerName+"-http"]
+		if httpRouter == nil {
+			t.Fatal("websecure-only site has no HTTP redirect router")
+		}
+		if len(httpRouter.EntryPoints) != 1 || httpRouter.EntryPoints[0] != httpEntryPoint {
+			t.Errorf("redirect entrypoints = %v", httpRouter.EntryPoints)
+		}
+		if len(httpRouter.Middlewares) != 1 || httpRouter.Middlewares[0] != "https-redirect" {
+			t.Errorf("redirect middlewares = %v", httpRouter.Middlewares)
+		}
+	})
+
+	t.Run("internal only skips the redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			EntryPoints:  []string{"internal"},
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "https-redirect")
+		if _, ok := cfg.HTTP.Routers[routerName+"-http"]; ok {
+			t.Fatal("internal-only site published an HTTP redirect router")
+		}
+		if cfg.HTTP.Routers[routerName] == nil {
+			t.Fatal("main router was not created")
+		}
+	})
+
+	t.Run("websecure plus internal keeps the redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			EntryPoints:  []string{httpsEntryPoint, "internal"},
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "https-redirect")
+		if cfg.HTTP.Routers[routerName+"-http"] == nil {
+			t.Fatal("site on websecure lost its HTTP redirect router")
+		}
+	})
+
+	t.Run("site redirect without a global middleware attaches forge-https-redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "")
+		httpRouter := cfg.HTTP.Routers[routerName+"-http"]
+		if httpRouter == nil {
+			t.Fatal("unset entrypoints dropped the HTTP redirect router")
+		}
+		if len(httpRouter.Middlewares) != 1 || httpRouter.Middlewares[0] != defaultRedirectMiddleware {
+			t.Errorf("middlewares = %v, want [%s]", httpRouter.Middlewares, defaultRedirectMiddleware)
+		}
+		if cfg.HTTP.Middlewares[defaultRedirectMiddleware] == nil {
+			t.Fatal("forge-https-redirect middleware was not defined")
+		}
+	})
 }
 
 // -- Lifecycle --

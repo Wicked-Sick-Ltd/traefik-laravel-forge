@@ -698,12 +698,16 @@ func createRouter(
 	if !tags.HTTPRedirect || !enableTLS {
 		return
 	}
-	// The redirect router listens on the public HTTP entrypoint, so it may only
-	// exist when the site is allowed on that entrypoint: an entrypoints tag
-	// that omits it keeps the hostname off port 80 entirely.
-	if len(tags.EntryPoints) > 0 && !slices.Contains(tags.EntryPoints, httpEntryPoint) {
-		pluginLog.Printf("Skipping HTTP redirect router for %q: entrypoints %v do not include %q",
-			routerName, tags.EntryPoints, httpEntryPoint)
+	// The redirect router listens on the public HTTP entrypoint. Skip it only
+	// when the site is not on a public entrypoint at all. websecure is the
+	// public TLS entrypoint (and the default), so a tag that lists it still
+	// gets the redirect. A tag that names only something else, such as an
+	// internal entrypoint, keeps the hostname off port 80.
+	if len(tags.EntryPoints) > 0 &&
+		!slices.Contains(tags.EntryPoints, httpEntryPoint) &&
+		!slices.Contains(tags.EntryPoints, httpsEntryPoint) {
+		pluginLog.Printf("Skipping HTTP redirect router for %q: entrypoints %v include neither %q nor %q",
+			routerName, tags.EntryPoints, httpEntryPoint, httpsEntryPoint)
 		return
 	}
 	// A site-level http-redirect tag can enable this router when the global
