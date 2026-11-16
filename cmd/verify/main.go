@@ -28,6 +28,7 @@ func main() {
 	httpRedirect := flag.Bool("http-redirect", false, "Generate HTTP->HTTPS redirect routers")
 	redirectMiddleware := flag.String("redirect-middleware", "", "Name of redirect middleware to use with http-redirect")
 	traefikID := flag.String("traefik-id", "", "Only process servers tagged traefik:traefik-id=<value> (for multi-LB setups)")
+	cleartextCIDRs := flag.String("cleartext-cidrs", "", "Comma-separated extra CIDRs that may be dialed over cleartext HTTP")
 	comparePath := flag.String("compare", "", "Path to existing Traefik dynamic config file (.yml) to compare against")
 	jsonOut := flag.Bool("json", false, "Output generated config as JSON")
 	dumpRaw := flag.Bool("dump", false, "Dump raw Forge API responses as JSON (useful for inspecting available fields)")
@@ -50,6 +51,14 @@ func main() {
 	cfg.HTTPRedirect = *httpRedirect
 	cfg.RedirectMiddleware = *redirectMiddleware
 	cfg.TraefikID = *traefikID
+	if *cleartextCIDRs != "" {
+		for _, c := range strings.Split(*cleartextCIDRs, ",") {
+			c = strings.TrimSpace(c)
+			if c != "" {
+				cfg.CleartextCIDRs = append(cfg.CleartextCIDRs, c)
+			}
+		}
+	}
 
 	provider, err := forge.New(context.Background(), cfg, "verify")
 	if err != nil {

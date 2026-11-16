@@ -44,9 +44,12 @@ On each poll the plugin:
 
 Backends are dialed over cleartext HTTP, so the plugin only publishes a server
 whose upstream is a private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`) or
-loopback IP address. A server with no private IP, or with an `upstream-host` /
-`upstreamHost` override that is a public IP or a hostname, is skipped with a
-log line rather than proxied in the clear across the internet.
+loopback IP address, or an address inside `cleartextCIDRs`. A server with no
+private IP, or with an `upstream-host` / `upstreamHost` override that is a
+public IP or a hostname, is skipped with a log line rather than proxied in the
+clear across the internet. Tag the server `traefik:upstream-scheme=https` (or
+set `upstreamScheme: https` on its mapping) to publish that origin over TLS
+instead.
 
 Each site produces:
 - A **main router** covering all its primary and alias domains (with `HostRegexp` for wildcard-enabled domains)
@@ -133,7 +136,8 @@ That's all that's needed. The plugin discovers your servers and sites automatica
 | `httpRedirect` | bool | `false` | Generate HTTP→HTTPS redirect routers for all sites |
 | `redirectMiddleware` | string | `""` | Name of an externally-defined redirect middleware to use. If empty and `httpRedirect` is `true`, the plugin creates `forge-https-redirect` automatically |
 | `traefikID` | string | `""` | When set, only process servers tagged `traefik:traefik-id=<value>`. Use this in multi-LB setups so each Traefik instance only routes its own servers. Servers with no matching tag are skipped |
-| `serverMappings` | array | `[]` | Optional: explicitly set the upstream host/port for specific servers (tags take priority over this) |
+| `serverMappings` | array | `[]` | Optional: explicitly set the upstream host/port/scheme for specific servers (tags take priority over this) |
+| `cleartextCIDRs` | array | `[]` | Extra CIDRs that may be dialed over cleartext HTTP, in addition to private and loopback addresses |
 
 ### serverMappings
 
@@ -146,8 +150,15 @@ serverMappings:
     upstreamPort: 8080          # override default port 80
 ```
 
-`upstreamHost` must be a private or loopback IP address; a public IP or a hostname
-causes the server to be skipped (see [How it works](#how-it-works)).
+`upstreamHost` must be a private or loopback IP address when the scheme is
+`http` (the default); a public IP or a hostname causes the server to be skipped
+(see [How it works](#how-it-works)). Set `upstreamScheme: https` to publish a
+public address or a hostname over TLS. An implicit port of 80 then becomes 443.
+
+```yaml
+cleartextCIDRs:
+  - "100.64.0.0/10"   # overlay the operator trusts, dialed over cleartext HTTP
+```
 
 Both override fields are optional. Omit `upstreamHost` to override only the port
 and keep the IP address auto-detected from Forge:
@@ -203,7 +214,8 @@ Add these to a server in Forge to override how it's addressed:
 
 | Tag | Example | Description |
 |-----|---------|-------------|
-| `traefik:upstream-host` | `traefik:upstream-host=10.0.1.10` | Override the auto-detected server IP. Must be a private or loopback IP address |
+| `traefik:upstream-host` | `traefik:upstream-host=10.0.1.10` | Override the auto-detected server IP. On `http`, must be a private or loopback IP, or an address inside `cleartextCIDRs` |
+| `traefik:upstream-scheme` | `traefik:upstream-scheme=https` | Dial the origin over TLS. Required to publish a public IP or a hostname. An implicit port of 80 becomes 443 |
 | `traefik:upstream-port` | `traefik:upstream-port=8080` | Override the default backend port (80) |
 | `traefik:traefik-id` | `traefik:traefik-id=lb01` | Informational: which Traefik instance handles this server |
 
@@ -309,7 +321,7 @@ go run ./cmd/verify ... --dump
 go run ./cmd/verify ... --json
 ```
 
-Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`.
+Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`, `--cleartext-cidrs`.
 
 ## Troubleshooting
 
@@ -320,7 +332,8 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
 - A log line saying the upstream "is not a private or loopback IP address" means the
   server has no private IP in Forge, or its `upstream-host` / `upstreamHost` override
   is a public IP or hostname. Put the server on a private network shared with Traefik
-  and point the override at that private IP
+  and point the override at that private IP, add the network to `cleartextCIDRs`, or
+  set `traefik:upstream-scheme=https` so the hop is TLS
 
 **Routes created but traffic not flowing**
 - Verify the server's private IP is reachable from your Traefik host
