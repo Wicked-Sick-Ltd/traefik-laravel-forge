@@ -105,6 +105,8 @@ traefik:aliases=app.example.com,www.example.com
 
 These are appended as `|| Host(...)` clauses to the generated rule. For subdomains already covered by a wildcard domain (`allow_wildcard_subdomains` enabled in Forge), this tag is unnecessary.
 
+Each alias must be a dotted hostname; entries that are not are ignored with a log line. An alias that another site already serves is not routed for this site — see [Hostname normalisation and ownership](#hostname-normalisation-and-ownership).
+
 ---
 
 ### `traefik:middlewares`
@@ -191,6 +193,19 @@ Has no effect when `traefikID` is not set in the plugin config (single-LB mode).
 ## Forge configuration auto-behaviours
 
 These are not tags — they are settings you configure in the Forge UI that the plugin reads automatically when fetching domain records.
+
+### Hostname normalisation and ownership
+
+Every hostname the plugin routes — domain records, the site-name fallback, the Reverb host and `traefik:aliases` entries — is lowercased and has one trailing dot removed before it is used. That is the form Traefik's `Host` matcher compares, so `Shop.Example.com` and `shop.example.com.` are the same name as `shop.example.com`. Router names (`forge-<site-id>-<host>`) and router priority (100 per label) come from that canonical name. Anything that is not a dotted hostname (letters, digits and hyphens) is ignored with a log line.
+
+A canonical hostname is routed to one site only:
+
+1. If only one site asks for it, that site gets it.
+2. If several sites ask for it, the site that served it after the previous poll keeps it.
+3. Otherwise, if exactly one of those sites spells it in canonical form in Forge, that site gets it.
+4. Otherwise no site gets it until the conflict is removed in Forge.
+
+Each conflict is logged on every poll as `forge: host "..." is requested by sites ...`. The same applies to the `www.` host added by a www redirect. A hostname that another site already serves cannot be taken over by adding it as an alias or domain on a second site; remove it from the first site and the second site picks it up on the next poll.
 
 ### .on-forge.com domains
 

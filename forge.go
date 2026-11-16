@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,6 +154,11 @@ type Provider struct {
 
 	lookupMu sync.Mutex
 	lookups  map[string]siteLookup
+
+	// hostOwners maps each canonical hostname in the last generated
+	// configuration to the cacheKey of the site that served it.
+	ownersMu   sync.Mutex
+	hostOwners map[string]string
 
 	mu     sync.Mutex
 	cancel func()
@@ -368,31 +374,40 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 
 	pluginLog.Printf("Fetched %d servers from Forge", len(servers))
 
+	var plans []sitePlan
 	for _, server := range servers {
-		if err := p.processServer(server, configuration, redirectMiddlewareName); err != nil {
+		serverPlans, err := p.planServer(server)
+		if err != nil {
 			return nil, err
 		}
+		plans = append(plans, serverPlans...)
 	}
+
+	// Every site's hostnames are known before any router is written, so which
+	// site serves a contested hostname cannot depend on the order Forge lists
+	// servers and sites in.
+	owners := p.resolveHostOwners(plans)
+	published := make(map[string]string)
+	for i := range plans {
+		emitSite(&plans[i], owners, published, configuration, redirectMiddlewareName)
+	}
+	p.storeHostOwners(published)
 
 	return configuration, nil
 }
 
-// processServer adds routers for every enabled site on one Forge server.
+// planServer collects the routing plan for every enabled site on one Forge server.
 // A non-nil error means the server's routing state could not be determined —
 // the caller must abandon the whole poll rather than emit a partial config,
 // which Traefik would apply by deleting the missing routers.
-func (p *Provider) processServer(
-	server ForgeServer,
-	configuration *dynamic.Configuration,
-	redirectMiddlewareName string,
-) error {
+func (p *Provider) planServer(server ForgeServer) ([]sitePlan, error) {
 	tagConfig := ParseServerTags(server.Attributes.Tags)
 
 	// In multi-LB mode, skip servers not assigned to this instance.
 	if p.traefikID != "" && tagConfig.TraefikID != p.traefikID {
 		pluginLog.Printf("Server %q skipped (traefik-id=%q, want %q)",
 			server.Attributes.Name, tagConfig.TraefikID, p.traefikID)
-		return nil
+		return nil, nil
 	}
 
 	// Look up an explicit server mapping from plugin config (lowest priority override).
@@ -414,7 +429,7 @@ func (p *Provider) processServer(
 
 	sites, err := p.client.FetchSites(server.ID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch sites for server %q: %w", server.Attributes.Name, err)
+		return nil, fmt.Errorf("failed to fetch sites for server %q: %w", server.Attributes.Name, err)
 	}
 
 	pluginLog.Printf("Found %d sites on server %q", len(sites), server.Attributes.Name)
@@ -422,25 +437,28 @@ func (p *Provider) processServer(
 	// Skip the server entirely if none of its sites are enabled.
 	if !hasEnabledSites(sites, p.defaultSitesEnabled) {
 		pluginLog.Printf("Server %q has no enabled sites, skipping", server.Attributes.Name)
-		return nil
+		return nil, nil
 	}
 
 	if upstreamHost == "" {
 		pluginLog.Printf("Server %q has enabled sites but no IP address — skipping", server.Attributes.Name)
-		return nil
+		return nil, nil
 	}
 
 	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
 
+	var plans []sitePlan
 	for _, site := range sites {
-		if err := p.processSite(
-			site, server.ID, upstreamHost, upstreamPort, configuration, redirectMiddlewareName,
-		); err != nil {
-			return err
+		plan, err := p.planSite(site, server.ID, upstreamHost, upstreamPort)
+		if err != nil {
+			return nil, err
+		}
+		if plan != nil {
+			plans = append(plans, *plan)
 		}
 	}
 
-	return nil
+	return plans, nil
 }
 
 // resolveUpstream determines the upstream host and port for a server using the
@@ -509,18 +527,59 @@ func isSiteEnabled(tags []string, defaultEnabled bool) bool {
 	return defaultEnabled
 }
 
-// processSite adds the routers for a single Forge site. As with processServer, a
+// hostRoute is one router a site asks for, before ownership of its hostnames
+// across sites has been decided. host and wwwHost are canonical (see canonicalHost).
+type hostRoute struct {
+	routerName   string
+	host         string
+	wwwHost      string
+	wildcard     bool
+	exact        bool // the Forge name or tag already was the canonical spelling
+	tags         siteTagConfig
+	enableTLS    bool
+	certResolver string
+}
+
+// sitePlan is everything one site needs routed. claims maps each canonical
+// hostname the site asks for to whether any of its requests spelled it exactly.
+type sitePlan struct {
+	key         string
+	name        string
+	serviceName string
+	backendURL  string
+	routes      []hostRoute
+	reverb      []hostRoute
+	claims      map[string]bool
+}
+
+func (s *sitePlan) claim(r hostRoute) {
+	for _, h := range []string{r.host, r.wwwHost} {
+		if h != "" && !s.claims[h] {
+			s.claims[h] = r.exact
+		}
+	}
+}
+
+func (s *sitePlan) hasRoute(routerName string) bool {
+	for _, r := range s.routes {
+		if r.routerName == routerName {
+			return true
+		}
+	}
+	return false
+}
+
+// planSite builds the routing plan for a single Forge site. As with planServer, a
 // non-nil error means routing state is unknown and the poll must be abandoned.
-func (p *Provider) processSite(
+// A nil plan with a nil error means the site is not routed.
+func (p *Provider) planSite(
 	site ForgeSite,
 	serverID, upstreamHost string,
 	upstreamPort int,
-	configuration *dynamic.Configuration,
-	redirectMiddlewareName string,
-) error {
+) (*sitePlan, error) {
 	if site.Attributes.Status != "installed" {
 		pluginLog.Printf("Site %q status=%q, skipping", site.Attributes.Name, site.Attributes.Status)
-		return nil
+		return nil, nil
 	}
 
 	defaults := siteDefaults{
@@ -533,7 +592,7 @@ func (p *Provider) processSite(
 
 	if !tags.Enabled {
 		pluginLog.Printf("Site %q disabled, skipping", site.Attributes.Name)
-		return nil
+		return nil, nil
 	}
 
 	// Domains and the Reverb integration come from the cache. These two calls are
@@ -543,7 +602,7 @@ func (p *Provider) processSite(
 	// site name would silently swap every real customer hostname for the Forge one.
 	lookup, err := p.siteLookupFor(serverID, site)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	domains, reverbHost := lookup.domains, lookup.reverbHost
 
@@ -559,102 +618,238 @@ func (p *Provider) processSite(
 		}}
 	}
 
-	serviceName := fmt.Sprintf("forge-%s-%s-service", site.Attributes.Name, site.ID)
-	siteBackendURL := fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port)
+	plan := &sitePlan{
+		key:         cacheKey(serverID, site.ID),
+		name:        site.Attributes.Name,
+		serviceName: fmt.Sprintf("forge-%s-%s-service", site.Attributes.Name, site.ID),
+		backendURL:  fmt.Sprintf("http://%s:%d", upstreamHost, tags.Port),
+		claims:      map[string]bool{},
+	}
 
 	// One router per Forge domain record.
-	routersCreated := 0
 	for _, d := range mainDomains {
-		if p.createDomainRouter(site.ID, d, serviceName, tags, configuration, redirectMiddlewareName) {
-			routersCreated++
+		if r, ok := domainRoute(site.ID, d, tags); ok {
+			plan.claim(r)
+			if !plan.hasRoute(r.routerName) {
+				plan.routes = append(plan.routes, r)
+			}
 		}
 	}
 
 	// traefik:aliases → one router per alias, skipping any already covered by a domain record.
 	for _, alias := range tags.Aliases {
-		routerName := fmt.Sprintf("forge-%s-%s", site.ID, alias)
-		if _, exists := configuration.HTTP.Routers[routerName]; !exists {
-			createRouter(routerName, fmt.Sprintf("Host(`%s`)", alias), serviceName, tags,
-				tags.EnableTLS, tags.CertResolver, domainPriority(alias), configuration, redirectMiddlewareName)
+		host, ok := canonicalHost(alias)
+		if !ok {
+			pluginLog.Printf("Ignoring traefik:aliases entry %q on site %q: not a valid hostname",
+				alias, site.Attributes.Name)
+			continue
+		}
+		r := hostRoute{
+			routerName:   routerNameFor(site.ID, host),
+			host:         host,
+			exact:        alias == host,
+			tags:         tags,
+			enableTLS:    tags.EnableTLS,
+			certResolver: tags.CertResolver,
+		}
+		plan.claim(r)
+		if !plan.hasRoute(r.routerName) {
+			plan.routes = append(plan.routes, r)
+		}
+	}
+
+	// Reverb domains route through the same Nginx backend as the main site.
+	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
+	// HTTP redirect is suppressed — WebSocket clients don't follow redirects.
+	noRedirectTags := tags
+	noRedirectTags.HTTPRedirect = false
+	for _, rd := range reverbDomains {
+		if r, ok := domainRoute(site.ID, rd, noRedirectTags); ok {
+			plan.claim(r)
+			plan.reverb = append(plan.reverb, r)
+		}
+	}
+
+	return plan, nil
+}
+
+// domainRoute describes the router for a single Forge domain record,
+// incorporating any www redirect and wildcard subdomain variants. Returns false
+// if the domain is filtered out.
+func domainRoute(siteID string, domain ForgeDomain, tags siteTagConfig) (hostRoute, bool) {
+	name := domain.Attributes.Name
+	host, ok := canonicalHost(name)
+	if !ok {
+		pluginLog.Printf("Ignoring domain %q: not a valid hostname", name)
+		return hostRoute{}, false
+	}
+
+	r := hostRoute{
+		routerName:   routerNameFor(siteID, host),
+		host:         host,
+		exact:        name == host,
+		tags:         tags,
+		enableTLS:    tags.EnableTLS,
+		certResolver: tags.CertResolver,
+	}
+
+	// .on-forge.com domains are skipped unless the site opted in.
+	if strings.HasSuffix(host, ".on-forge.com") {
+		if !tags.IncludeForgeDomain {
+			pluginLog.Printf("Skipping .on-forge.com domain %q (use traefik:forge-domain=true to include)", host)
+			return hostRoute{}, false
+		}
+		// Opted in but Forge controls TLS — disable cert management for this domain.
+		pluginLog.Printf("Domain %q is .on-forge.com — disabling TLS", host)
+		r.tags.EnableTLS = false
+		r.tags.CertResolver = ""
+		r.enableTLS = false
+		r.certResolver = ""
+		return r, true
+	}
+
+	r.wildcard = domain.Attributes.AllowWildcardSubdomains
+	if domain.Attributes.WWWRedirectType != "" && domain.Attributes.WWWRedirectType != "none" &&
+		!strings.HasPrefix(host, "www.") {
+		if www, ok := canonicalHost("www." + host); ok {
+			r.wwwHost = www
+		}
+	}
+	return r, true
+}
+
+func routerNameFor(siteID, host string) string {
+	return fmt.Sprintf("forge-%s-%s", siteID, host)
+}
+
+// resolveHostOwners decides which site serves each canonical hostname. Traefik
+// matches Host rules case-insensitively and ignores one trailing dot, so two
+// sites asking for the same canonical name would otherwise both match, and the
+// higher priority or earlier router would take the other site's traffic.
+//
+// A name asked for by one site belongs to it. When several sites ask, the site
+// that served the name after the previous poll keeps it; failing that, the one
+// site whose Forge record or tag spells it exactly gets it; failing that, no
+// site does.
+func (p *Provider) resolveHostOwners(plans []sitePlan) map[string]string {
+	claimants := make(map[string][]int)
+	for i := range plans {
+		for host := range plans[i].claims {
+			claimants[host] = append(claimants[host], i)
+		}
+	}
+
+	previous := p.loadHostOwners()
+	owners := make(map[string]string, len(claimants))
+	for host, idx := range claimants {
+		if owner, ok := pickHostOwner(host, idx, plans, previous[host]); ok {
+			owners[host] = owner
+		}
+	}
+	return owners
+}
+
+func pickHostOwner(host string, idx []int, plans []sitePlan, incumbent string) (string, bool) {
+	if len(idx) == 1 {
+		return plans[idx[0]].key, true
+	}
+
+	names := make([]string, 0, len(idx))
+	var exact []int
+	for _, i := range idx {
+		if incumbent != "" && plans[i].key == incumbent {
+			return incumbent, true
+		}
+		if plans[i].claims[host] {
+			exact = append(exact, i)
+		}
+		names = append(names, fmt.Sprintf("%q", plans[i].name))
+	}
+	sort.Strings(names)
+
+	if len(exact) == 1 {
+		fmt.Fprintf(os.Stderr, "forge: host %q is requested by sites %s; routing it only to site %q\n",
+			host, strings.Join(names, ", "), plans[exact[0]].name)
+		return plans[exact[0]].key, true
+	}
+	fmt.Fprintf(os.Stderr, "forge: host %q is requested by sites %s; routing it to none of them\n",
+		host, strings.Join(names, ", "))
+	return "", false
+}
+
+// emitSite writes the routers and service for one site, leaving out every
+// hostname the site does not own, and records each published hostname.
+func emitSite(
+	plan *sitePlan,
+	owners, published map[string]string,
+	configuration *dynamic.Configuration,
+	redirectMiddlewareName string,
+) {
+	routersCreated := 0
+	for _, r := range plan.routes {
+		if emitRoute(plan, r, owners, published, configuration, redirectMiddlewareName) {
 			routersCreated++
 		}
 	}
 
 	if routersCreated == 0 {
-		return nil
+		return
 	}
 
-	configuration.HTTP.Services[serviceName] = &dynamic.Service{
+	configuration.HTTP.Services[plan.serviceName] = &dynamic.Service{
 		LoadBalancer: &dynamic.ServersLoadBalancer{
-			Servers:        []dynamic.Server{{URL: siteBackendURL}},
+			Servers:        []dynamic.Server{{URL: plan.backendURL}},
 			PassHostHeader: boolPtr(true),
 		},
 	}
 
-	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
+	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, plan.name, plan.backendURL)
 
-	// Reverb domains route through the same Nginx backend as the main site.
-	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
-	// HTTP redirect is suppressed — WebSocket clients don't follow redirects.
-	if len(reverbDomains) > 0 {
-		noRedirectTags := tags
-		noRedirectTags.HTTPRedirect = false
-		for _, rd := range reverbDomains {
-			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
-				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
-					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
-			}
+	for _, r := range plan.reverb {
+		if emitRoute(plan, r, owners, published, configuration, redirectMiddlewareName) {
+			pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+				plan.name, r.host, plan.backendURL)
 		}
 	}
-
-	return nil
 }
 
-// createDomainRouter creates a Traefik router for a single Forge domain record,
-// incorporating any www redirect and wildcard subdomain variants. Returns true if
-// a router was created (false if the domain was filtered out).
-func (p *Provider) createDomainRouter(
-	siteID string,
-	domain ForgeDomain,
-	serviceName string,
-	tags siteTagConfig,
+func emitRoute(
+	plan *sitePlan,
+	r hostRoute,
+	owners, published map[string]string,
 	configuration *dynamic.Configuration,
 	redirectMiddlewareName string,
 ) bool {
-	name := domain.Attributes.Name
-
-	// .on-forge.com domains are skipped unless the site opted in.
-	if strings.HasSuffix(name, ".on-forge.com") {
-		if !tags.IncludeForgeDomain {
-			pluginLog.Printf("Skipping .on-forge.com domain %q (use traefik:forge-domain=true to include)", name)
-			return false
-		}
-		// Opted in but Forge controls TLS — disable cert management for this domain.
-		pluginLog.Printf("Domain %q is .on-forge.com — disabling TLS", name)
-		noTLSTags := tags
-		noTLSTags.EnableTLS = false
-		noTLSTags.CertResolver = ""
-		createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
-			fmt.Sprintf("Host(`%s`)", name), serviceName, noTLSTags,
-			false, "", domainPriority(name), configuration, redirectMiddlewareName)
-		return true
+	if owners[r.host] != plan.key {
+		return false
 	}
-
-	// Build the rule, adding www and wildcard variants that belong to this domain.
-	hosts := []string{name}
+	hosts := []string{r.host}
+	if r.wwwHost != "" && owners[r.wwwHost] == plan.key {
+		hosts = append(hosts, r.wwwHost)
+	}
 	var wildcardHosts []string
-	if domain.Attributes.AllowWildcardSubdomains {
-		wildcardHosts = []string{name}
-	}
-	if domain.Attributes.WWWRedirectType != "" && domain.Attributes.WWWRedirectType != "none" &&
-		!strings.HasPrefix(name, "www.") {
-		hosts = append(hosts, "www."+name)
+	if r.wildcard {
+		wildcardHosts = []string{r.host}
 	}
 
-	createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
-		buildHostRule(hosts, wildcardHosts), serviceName, tags,
-		tags.EnableTLS, tags.CertResolver, domainPriority(name), configuration, redirectMiddlewareName)
+	createRouter(r.routerName, buildHostRule(hosts, wildcardHosts), plan.serviceName, r.tags,
+		r.enableTLS, r.certResolver, domainPriority(r.host), configuration, redirectMiddlewareName)
+	for _, h := range hosts {
+		published[h] = plan.key
+	}
 	return true
+}
+
+func (p *Provider) loadHostOwners() map[string]string {
+	p.ownersMu.Lock()
+	defer p.ownersMu.Unlock()
+	return p.hostOwners
+}
+
+func (p *Provider) storeHostOwners(owners map[string]string) {
+	p.ownersMu.Lock()
+	defer p.ownersMu.Unlock()
+	p.hostOwners = owners
 }
 
 // createRouter writes a router (and optional HTTP redirect router) into configuration.
@@ -709,11 +904,12 @@ func createRouter(
 // domains. The reverbHost argument is authoritative — domain type alone is not
 // sufficient (see CLAUDE.md for details).
 func classifyDomains(domains []ForgeDomain, reverbHost string) (main, reverb []ForgeDomain) {
+	reverbCanonical, hasReverb := canonicalHost(reverbHost)
 	for _, d := range domains {
 		if d.Attributes.Status != "enabled" {
 			continue
 		}
-		if reverbHost != "" && d.Attributes.Name == reverbHost {
+		if name, ok := canonicalHost(d.Attributes.Name); hasReverb && ok && name == reverbCanonical {
 			reverb = append(reverb, d)
 		} else {
 			main = append(main, d)
@@ -877,9 +1073,37 @@ func buildHostRule(hosts, wildcardHosts []string) string {
 	return strings.Join(parts, " || ")
 }
 
+// canonicalHost returns the form of a hostname that Traefik's Host matcher
+// treats as equal to it: lowercased, with one trailing dot removed. It reports
+// false for anything that is not a dotted DNS hostname, which also keeps
+// backticks and other rule syntax out of generated rules.
+func canonicalHost(raw string) (string, bool) {
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if host == "" || len(host) > 253 {
+		return "", false
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return "", false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return "", false
+			}
+		}
+	}
+	return host, true
+}
+
 // domainPriority returns the routing priority for a domain-based router. More
 // specific (deeper) domains get higher priority so subdomain-specific rules
 // always outrank parent wildcard rules regardless of rule string length.
+// Callers pass the canonical host, so a trailing dot cannot add a level.
 func domainPriority(domain string) int {
 	return (strings.Count(domain, ".") + 1) * 100
 }
