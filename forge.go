@@ -924,12 +924,11 @@ type hostClaim struct {
 	eps    []string
 }
 
-// dropContestedHosts leaves one site publishing a hostname when several sites
-// ask for it on a shared entry point. The lowest site id keeps it and the
-// others lose that literal. A site's own second router is not a contest, and
-// routers on disjoint entry points are not either. Only a rule part that is
-// exactly Host(`name`) counts, so a value that smuggles extra rule syntax is
-// not treated as a claim of that name.
+// dropContestedHosts leaves a hostname with the lowest numeric site id on each
+// entry point it shares. A site that still wins one of its entry points keeps
+// the router and loses only the entry points it lost. A site's own second
+// router is not a contest. Only a rule part that is exactly Host(`name`) counts.
+// Hostnames are compared case-insensitively, with one trailing dot removed.
 func dropContestedHosts(configuration *dynamic.Configuration) {
 	if configuration == nil || configuration.HTTP == nil {
 		return
@@ -942,11 +941,19 @@ func dropContestedHosts(configuration *dynamic.Configuration) {
 		}
 		siteID := siteIDFromRouter(name, router.Rule)
 		siteOf[name] = siteID
+		eps := append([]string{}, router.EntryPoints...)
+		if httpRouter := configuration.HTTP.Routers[name+"-http"]; httpRouter != nil {
+			for _, ep := range httpRouter.EntryPoints {
+				if !slices.Contains(eps, ep) {
+					eps = append(eps, ep)
+				}
+			}
+		}
 		for _, host := range exactHosts(router.Rule) {
-			claims[host] = append(claims[host], hostClaim{
+			claims[claimHost(host)] = append(claims[claimHost(host)], hostClaim{
 				siteID: siteID,
 				router: name,
-				eps:    router.EntryPoints,
+				eps:    eps,
 			})
 		}
 	}
@@ -999,68 +1006,102 @@ func dropContestedHosts(configuration *dynamic.Configuration) {
 		}
 		router.Rule = rule
 	}
+	trimLostEntryPoints(configuration, claims)
+}
+
+// trimLostEntryPoints removes entry points a site lost while still winning
+// another one, and deletes its HTTP redirect router when it lost `web`.
+func trimLostEntryPoints(configuration *dynamic.Configuration, claims map[string][]hostClaim) {
+	for _, list := range claims {
+		if len(list) < 2 {
+			continue
+		}
+		winnerOf := entryPointWinners(list)
+		for _, c := range list {
+			var lost []string
+			won := false
+			for _, ep := range c.eps {
+				if winnerOf[ep] == c.siteID {
+					won = true
+					continue
+				}
+				lost = append(lost, ep)
+			}
+			if !won || len(lost) == 0 {
+				continue
+			}
+			router := configuration.HTTP.Routers[c.router]
+			if router != nil {
+				kept := make([]string, 0, len(router.EntryPoints))
+				for _, ep := range router.EntryPoints {
+					if !slices.Contains(lost, ep) {
+						kept = append(kept, ep)
+					}
+				}
+				router.EntryPoints = kept
+			}
+			if slices.Contains(lost, "web") {
+				delete(configuration.HTTP.Routers, c.router+"-http")
+			}
+		}
+	}
+}
+
+func entryPointWinners(list []hostClaim) map[string]string {
+	winnerOf := map[string]string{}
+	for _, c := range list {
+		for _, ep := range c.eps {
+			cur, ok := winnerOf[ep]
+			if !ok || siteIDLess(c.siteID, cur) {
+				winnerOf[ep] = c.siteID
+			}
+		}
+	}
+	return winnerOf
 }
 
 func losingSites(list []hostClaim) map[string]bool {
-	bySite := map[string][]hostClaim{}
-	var sites []string
+	if len(list) < 2 {
+		return nil
+	}
+	sites := map[string]struct{}{}
 	for _, c := range list {
-		if _, ok := bySite[c.siteID]; !ok {
-			sites = append(sites, c.siteID)
-		}
-		bySite[c.siteID] = append(bySite[c.siteID], c)
+		sites[c.siteID] = struct{}{}
 	}
 	if len(sites) < 2 {
 		return nil
 	}
-	conflicts := map[string]bool{}
-	for i := 0; i < len(sites); i++ {
-		for j := i + 1; j < len(sites); j++ {
-			if claimsOverlap(bySite[sites[i]], bySite[sites[j]]) {
-				conflicts[sites[i]] = true
-				conflicts[sites[j]] = true
+	// Each entry point belongs to the lowest numeric site id that listens on it.
+	// A site loses the hostname only when it wins none of its entry points, so
+	// sharing `web` does not take the host off `websecure`.
+	winnerOf := entryPointWinners(list)
+	losers := map[string]bool{}
+	for _, c := range list {
+		won := false
+		for _, ep := range c.eps {
+			if winnerOf[ep] == c.siteID {
+				won = true
+				break
 			}
 		}
-	}
-	if len(conflicts) == 0 {
-		return nil
-	}
-	winner := ""
-	for site := range conflicts {
-		if winner == "" || site < winner {
-			winner = site
-		}
-	}
-	losers := map[string]bool{}
-	for site := range conflicts {
-		if site != winner {
-			losers[site] = true
+		if !won {
+			losers[c.siteID] = true
 		}
 	}
 	return losers
 }
 
-func claimsOverlap(a, b []hostClaim) bool {
-	for _, left := range a {
-		for _, right := range b {
-			if entryPointsOverlap(left.eps, right.eps) {
-				return true
-			}
-		}
+func siteIDLess(a, b string) bool {
+	ai, aerr := strconv.ParseInt(a, 10, 64)
+	bi, berr := strconv.ParseInt(b, 10, 64)
+	if aerr == nil && berr == nil && ai != bi {
+		return ai < bi
 	}
-	return false
+	return a < b
 }
 
-func entryPointsOverlap(a, b []string) bool {
-	if len(a) == 0 || len(b) == 0 {
-		return true
-	}
-	for _, left := range a {
-		if slices.Contains(b, left) {
-			return true
-		}
-	}
-	return false
+func claimHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
 func siteIDFromRouter(name, rule string) string {
@@ -1107,9 +1148,6 @@ func plainHostname(value string) bool {
 		return false
 	}
 	labels := strings.Split(value, ".")
-	if len(labels) < 2 {
-		return false
-	}
 	for _, label := range labels {
 		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
@@ -1140,7 +1178,7 @@ func ruleWithoutHosts(rule string, drop map[string]bool) (string, bool) {
 	changed := false
 	for _, part := range parts {
 		host, ok := exactHostPart(part)
-		if ok && drop[host] {
+		if ok && drop[claimHost(host)] {
 			changed = true
 			continue
 		}

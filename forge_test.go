@@ -3,6 +3,7 @@ package traefik_laravel_forge
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -883,6 +884,103 @@ func TestParentWildcardDoesNotCaptureKeptExactHost(t *testing.T) {
 	}
 	if child.Priority <= parent.Priority {
 		t.Fatalf("exact priority %d does not beat wildcard priority %d", child.Priority, parent.Priority)
+	}
+}
+
+func TestNumericSiteIDBeatsLongerText(t *testing.T) {
+	server := appServer()
+	older := namedSite("2", "shop.example.com", nil)
+	newer := namedSite("10", "shop.example.com", nil)
+	domains := map[string][]ForgeDomain{}
+	domains["2"] = append(domains["2"], enabledDomain("shop.example.com"))
+	domains["10"] = append(domains["10"], enabledDomain("shop.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{older, newer}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-2-shop.example.com"] == nil {
+		t.Fatal("numeric id 2 lost the host to id 10")
+	}
+	if cfg.HTTP.Routers["forge-10-shop.example.com"] != nil {
+		t.Fatal("id 10 kept a host that id 2 also published")
+	}
+}
+
+func TestSingleLabelAliasIsRouted(t *testing.T) {
+	server := appServer()
+	site := namedSite("site1", "example.com", []string{"traefik:aliases=intranet"})
+	domains := map[string][]ForgeDomain{"site1": {enabledDomain("example.com")}}
+	p := routingProvider(t, newCatalog(server, []ForgeSite{site}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-site1-intranet"] == nil {
+		t.Fatal("single-label alias was not routed")
+	}
+}
+
+func TestWebOverlapDoesNotDropHTTPS(t *testing.T) {
+	server := appServer()
+	webOnly := namedSite("1", "shop.example.com", []string{"traefik:entrypoints=web", "traefik:tls=false"})
+	both := namedSite("2", "shop.example.com", []string{"traefik:entrypoints=web,websecure", "traefik:tls=true"})
+	domains := map[string][]ForgeDomain{}
+	domains["1"] = append(domains["1"], enabledDomain("shop.example.com"))
+	domains["2"] = append(domains["2"], enabledDomain("shop.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{webOnly, both}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpsRouter := cfg.HTTP.Routers["forge-2-shop.example.com"]
+	if httpsRouter == nil {
+		t.Fatal("site that also listens on websecure lost the host")
+	}
+	if !slices.Contains(httpsRouter.EntryPoints, "websecure") {
+		t.Fatalf("websecure was removed: %v", httpsRouter.EntryPoints)
+	}
+}
+
+func TestCaseVariantAliasIsTheSameHost(t *testing.T) {
+	server := appServer()
+	owner := namedSite("5", "shop.example.com", nil)
+	peer := namedSite("9", "other.example.com", []string{"traefik:aliases=Shop.example.com"})
+	domains := map[string][]ForgeDomain{}
+	domains["5"] = append(domains["5"], enabledDomain("shop.example.com"))
+	domains["9"] = append(domains["9"], enabledDomain("other.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{owner, peer}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-5-shop.example.com"] == nil {
+		t.Fatal("canonical owner lost the host")
+	}
+	if cfg.HTTP.Routers["forge-9-Shop.example.com"] != nil {
+		t.Fatal("case-variant alias was treated as a different host")
+	}
+}
+
+func TestRedirectEntrypointCountsInTheConflict(t *testing.T) {
+	server := appServer()
+	owner := namedSite("1", "shop.example.com", nil)
+	peer := namedSite("2", "shop.example.com", []string{"traefik:tls=false"})
+	domains := map[string][]ForgeDomain{}
+	domains["1"] = append(domains["1"], enabledDomain("shop.example.com"))
+	domains["2"] = append(domains["2"], enabledDomain("shop.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{owner, peer}, domains, nil))
+	p.defaultCertResolver = "cloudflare"
+	p.httpRedirect = true
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-1-shop.example.com"] == nil {
+		t.Fatal("TLS owner lost the host")
+	}
+	if cfg.HTTP.Routers["forge-2-shop.example.com"] != nil {
+		t.Fatal("plain-HTTP peer still publishes the owner's host")
 	}
 }
 
