@@ -162,17 +162,42 @@ func compare(w io.Writer, generated *dynamic.Configuration, existingHosts map[st
 	sort.Strings(routerNames)
 
 	generatedHosts := make(map[string]routerInfo)
+	var rejected []rejectedRule
+	tainted := make(map[string]bool)
 	for _, name := range routerNames {
 		r := generated.HTTP.Routers[name]
 		// Collect every host the rule matches, so --compare does not report the
 		// www./wildcard variants of a multi-host rule as missing.
-		for _, host := range extractHosts(r.Rule) {
+		hosts, unaccepted, ok := parseHostRule(r.Rule)
+		if !ok {
+			rejected = append(rejected, rejectedRule{name: name, rule: r.Rule, unaccepted: unaccepted})
+			for _, host := range extractHosts(r.Rule) {
+				tainted[host] = true
+			}
+			continue
+		}
+		for _, host := range hosts {
 			generatedHosts[host] = routerInfo{name: name, backend: routerBackend(generated, r), tls: r.TLS != nil}
 		}
+	}
+	// A host named in a rejected rule is reachable through that rule's extra
+	// matchers too, so a clean router for the same host does not make it covered.
+	for host := range tainted {
+		delete(generatedHosts, host)
 	}
 
 	_, _ = fmt.Fprintf(w, "\nExisting config has %d Host() rules\n", len(existingHosts))
 	_, _ = fmt.Fprintf(w, "Generated config has %d Host() rules\n\n", len(generatedHosts))
+
+	if len(rejected) > 0 {
+		_, _ = fmt.Fprintf(w, "REJECTED (generated rules that match on more than hostnames; their hosts are not counted as covered):\n")
+		for _, rr := range rejected {
+			_, _ = fmt.Fprintf(w, "  ! %s\n", rr.name)
+			_, _ = fmt.Fprintf(w, "      rule:       %s\n", rr.rule)
+			_, _ = fmt.Fprintf(w, "      not a host: %s\n", rr.unaccepted)
+		}
+		_, _ = fmt.Fprintln(w)
+	}
 
 	// In existing but NOT in generated
 	missing := []string{}
@@ -189,7 +214,7 @@ func compare(w io.Writer, generated *dynamic.Configuration, existingHosts map[st
 			_, _ = fmt.Fprintf(w, "  - %s\n", h)
 		}
 		_, _ = fmt.Fprintln(w)
-	} else {
+	} else if len(rejected) == 0 {
 		_, _ = fmt.Fprintln(w, "OK: All hosts from your existing config are covered by the generated config.")
 		_, _ = fmt.Fprintln(w)
 	}
@@ -233,7 +258,97 @@ func compare(w io.Writer, generated *dynamic.Configuration, existingHosts map[st
 		_, _ = fmt.Fprintln(w)
 	}
 
+	if len(rejected) > 0 {
+		return fmt.Errorf("%d generated router(s) match on more than hostnames; see REJECTED", len(rejected))
+	}
 	return nil
+}
+
+type rejectedRule struct {
+	name       string
+	rule       string
+	unaccepted string
+}
+
+// parseHostRule accepts only the rule shape the plugin is meant to generate:
+// Host(`name`) and wildcard HostRegexp(`^[^.]+\.name$`) clauses joined by ||.
+// Anything else — another matcher, &&, negation, grouping, a hostname that is
+// not a plain DNS name — makes ok false, and unaccepted holds the rule text
+// from the first clause that could not be accepted.
+func parseHostRule(rule string) (hosts []string, unaccepted string, ok bool) {
+	rest := strings.TrimSpace(rule)
+	if rest == "" {
+		return nil, "(empty rule)", false
+	}
+	for {
+		host, tail, clauseOK := parseHostClause(rest)
+		if !clauseOK {
+			return nil, rest, false
+		}
+		hosts = append(hosts, host)
+
+		tail = strings.TrimSpace(tail)
+		if tail == "" {
+			return hosts, "", true
+		}
+		next, found := strings.CutPrefix(tail, "||")
+		if !found {
+			return nil, tail, false
+		}
+		rest = strings.TrimSpace(next)
+	}
+}
+
+// parseHostClause reads one host clause from the start of s and returns the
+// hostname (wildcards as "*.domain") and the text after the clause.
+func parseHostClause(s string) (host, tail string, ok bool) {
+	if body, ok := strings.CutPrefix(s, "Host(`"); ok {
+		name, tail, closed := strings.Cut(body, "`)")
+		if !closed || !isHostname(name) {
+			return "", "", false
+		}
+		return name, tail, true
+	}
+
+	if body, ok := strings.CutPrefix(s, "HostRegexp(`"); ok {
+		pattern, tail, closed := strings.Cut(body, "`)")
+		if !closed {
+			return "", "", false
+		}
+		const wildcardPrefix = `^[^.]+\.`
+		escaped, hasPrefix := strings.CutPrefix(pattern, wildcardPrefix)
+		escaped, hasSuffix := strings.CutSuffix(escaped, "$")
+		if !hasPrefix || !hasSuffix {
+			return "", "", false
+		}
+		name := strings.ReplaceAll(escaped, `\.`, ".")
+		if strings.Count(escaped, `\.`) != strings.Count(name, ".") || !isHostname(name) {
+			return "", "", false
+		}
+		return "*." + name, tail, true
+	}
+
+	return "", "", false
+}
+
+// isHostname reports whether s is a dot-separated DNS name made only of
+// letters, digits, hyphens and underscores.
+func isHostname(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for _, c := range label {
+			isAlnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+			if !isAlnum && c != '-' && c != '_' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // extractHosts pulls every hostname out of a Traefik rule fragment. A rule may

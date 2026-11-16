@@ -164,7 +164,7 @@ FORGE_TOKEN=xxx FORGE_ORG=wickedsick go run ./cmd/verify \
   --http-redirect
 ```
 
-Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config.
+Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config. `--compare` only treats a generated rule as host coverage when it parses as `||`-joined ``Host(`name`)`` / wildcard `HostRegexp` clauses (`parseHostRule`); any other rule is REJECTED, its hosts are withheld from coverage, and the tool exits 1.
 
 Dump output files (`dump*.json`, `verify.out`) are gitignored.
 
