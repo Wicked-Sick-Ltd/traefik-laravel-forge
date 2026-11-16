@@ -649,6 +649,168 @@ func TestResolveUpstream(t *testing.T) {
 
 // Stop must be safe to call at any point in the lifecycle: after Provide, twice
 // in a row, and on a provider that never started.
+// catalogForge serves one server and whatever sites, domains and Reverb
+// records the test put on it.
+type catalogForge struct {
+	server  ForgeServer
+	sites   []ForgeSite
+	domains map[string][]ForgeDomain
+	reverb  map[string]*ForgeReverbIntegration
+}
+
+func (c catalogForge) FetchServers() ([]ForgeServer, error)   { return []ForgeServer{c.server}, nil }
+func (c catalogForge) FetchSites(string) ([]ForgeSite, error) { return c.sites, nil }
+func (c catalogForge) FetchDomains(_, siteID string) ([]ForgeDomain, error) {
+	return c.domains[siteID], nil
+}
+func (c catalogForge) FetchReverbIntegration(_, siteID string) (*ForgeReverbIntegration, error) {
+	return c.reverb[siteID], nil
+}
+
+func routingProvider(t *testing.T, client ForgeClient) *Provider {
+	t.Helper()
+	p, err := NewProviderWithClient(&Config{
+		PollInterval:        "30s",
+		DefaultSitesEnabled: true,
+	}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func enabledDomain(name string) ForgeDomain {
+	return ForgeDomain{
+		ID:   name,
+		Type: "domainRecords",
+		Attributes: ForgeDomainAttributes{
+			Name:   name,
+			Status: "enabled",
+		},
+	}
+}
+
+// TestOnForgeFilterDoesNotPublishSiteName pins the site-name fallback to sites
+// that have no main domain records, and keeps a Reverb router when the only
+// main record is a Forge default name.
+func TestOnForgeFilterDoesNotPublishSiteName(t *testing.T) {
+	server := ForgeServer{
+		ID:   "s1",
+		Type: "servers",
+		Attributes: ForgeServerAttributes{
+			Name:             "app01",
+			PrivateIPAddress: "10.0.0.1",
+		},
+	}
+
+	t.Run("on-forge plus reverb publishes only the reverb host", func(t *testing.T) {
+		p := routingProvider(t, catalogForge{
+			server: server,
+			sites: []ForgeSite{{
+				ID:         "site1",
+				Type:       "sites",
+				Attributes: ForgeSiteAttributes{Name: "example.com", Status: "installed"},
+			}},
+			domains: map[string][]ForgeDomain{
+				"site1": {enabledDomain("app.on-forge.com"), enabledDomain("ws.example.com")},
+			},
+			reverb: map[string]*ForgeReverbIntegration{
+				"site1": {Enabled: true, Host: "ws.example.com"},
+			},
+		})
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.HTTP.Routers["forge-site1-example.com"] != nil {
+			t.Fatal("site name was published after .on-forge.com records were filtered")
+		}
+		if cfg.HTTP.Routers["forge-site1-app.on-forge.com"] != nil {
+			t.Fatal(".on-forge.com router was published")
+		}
+		reverb := cfg.HTTP.Routers["forge-site1-ws.example.com"]
+		if reverb == nil {
+			t.Fatal("reverb router was not published")
+		}
+		if reverb.Priority != domainPriority("ws.example.com")+1 {
+			t.Errorf("reverb priority = %d, want %d", reverb.Priority, domainPriority("ws.example.com")+1)
+		}
+		if cfg.HTTP.Services["forge-example.com-site1-service"] == nil {
+			t.Fatal("service was not created for the reverb-only site")
+		}
+	})
+
+	t.Run("no domain records falls back to the site name", func(t *testing.T) {
+		p := routingProvider(t, catalogForge{
+			server: server,
+			sites: []ForgeSite{{
+				ID:         "site1",
+				Type:       "sites",
+				Attributes: ForgeSiteAttributes{Name: "example.com", Status: "installed"},
+			}},
+			domains: map[string][]ForgeDomain{},
+			reverb:  map[string]*ForgeReverbIntegration{},
+		})
+		cfg, err := p.GenerateConfiguration()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.HTTP.Routers["forge-site1-example.com"] == nil {
+			t.Fatal("site with no domain records did not fall back to its name")
+		}
+	})
+}
+
+// TestReverbRouterOutranksPeerAlias checks that the owning site's Reverb
+// router beats another site's router for the same hostname.
+func TestReverbRouterOutranksPeerAlias(t *testing.T) {
+	p := routingProvider(t, catalogForge{
+		server: ForgeServer{
+			ID:   "s1",
+			Type: "servers",
+			Attributes: ForgeServerAttributes{
+				Name:             "app01",
+				PrivateIPAddress: "10.0.0.1",
+			},
+		},
+		sites: []ForgeSite{
+			{
+				ID:         "owner",
+				Type:       "sites",
+				Attributes: ForgeSiteAttributes{Name: "shop.example.com", Status: "installed"},
+			},
+			{
+				ID:   "peer",
+				Type: "sites",
+				Attributes: ForgeSiteAttributes{
+					Name:   "other.example.com",
+					Status: "installed",
+					Tags:   []string{"traefik:aliases=ws.example.com"},
+				},
+			},
+		},
+		domains: map[string][]ForgeDomain{
+			"owner": {enabledDomain("shop.example.com"), enabledDomain("ws.example.com")},
+			"peer":  {enabledDomain("other.example.com")},
+		},
+		reverb: map[string]*ForgeReverbIntegration{
+			"owner": {Enabled: true, Host: "ws.example.com"},
+		},
+	})
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := cfg.HTTP.Routers["forge-owner-ws.example.com"]
+	peer := cfg.HTTP.Routers["forge-peer-ws.example.com"]
+	if owner == nil || peer == nil {
+		t.Fatalf("owner=%v peer=%v", owner != nil, peer != nil)
+	}
+	if owner.Priority <= peer.Priority {
+		t.Errorf("reverb priority %d does not beat peer priority %d", owner.Priority, peer.Priority)
+	}
+}
+
 func TestStopIsSafeAndIdempotent(t *testing.T) {
 	p, err := NewProviderWithClient(&Config{PollInterval: "30s"}, stubClient{})
 	if err != nil {

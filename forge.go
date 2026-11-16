@@ -549,15 +549,16 @@ func (p *Provider) processSite(
 
 	mainDomains, reverbDomains := classifyDomains(domains, reverbHost)
 
-	// Drop .on-forge.com names before deciding whether the site has a main
-	// domain. createDomainRouter would discard them anyway, and leaving them in
-	// would suppress the site-name fallback below.
+	// The site-name fallback runs only when Forge returned no main domain
+	// records. Dropping .on-forge.com names must not invent a router for the
+	// site name: that name may be a hostname the site no longer holds.
+	hadMainRecords := len(mainDomains) > 0
 	if !tags.IncludeForgeDomain {
 		mainDomains = withoutForgeDefaultDomains(mainDomains)
 	}
 
-	// Fallback: no routable Forge domain records → synthesize one from the site name.
-	if len(mainDomains) == 0 {
+	// Fallback: no main domain records at all → synthesize one from the site name.
+	if !hadMainRecords {
 		mainDomains = []ForgeDomain{{
 			Attributes: ForgeDomainAttributes{
 				Name:   site.Attributes.Name,
@@ -597,6 +598,12 @@ func (p *Provider) processSite(
 	for _, rd := range reverbDomains {
 		if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
 			routersCreated++
+			// One above a normal router for the same hostname, so another site's
+			// alias or domain record does not take the Reverb host on a tie.
+			routerName := fmt.Sprintf("forge-%s-%s", site.ID, rd.Attributes.Name)
+			if r := configuration.HTTP.Routers[routerName]; r != nil {
+				r.Priority = domainPriority(rd.Attributes.Name) + 1
+			}
 			pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
 				site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
 		}

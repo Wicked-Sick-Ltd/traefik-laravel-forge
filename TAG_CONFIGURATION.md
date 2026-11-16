@@ -137,7 +137,7 @@ traefik:forge-domain=true
 ```
 
 **Site with only `.on-forge.com` domains (no custom domain set yet):**
-Without this tag, the `.on-forge.com` records are dropped and the site falls back to its Forge site name; if that name is also `.on-forge.com`, no main router is created. A Reverb router is still created for the site's Reverb host. With the tag, the site is routed on HTTP only — TLS is disabled since we can't obtain certs for domains we don't control.
+Without this tag, the `.on-forge.com` records are dropped and no main router is created. The plugin does not fall back to the Forge site name in that case, because that name may be a hostname the site no longer holds. A Reverb router is still created for the site's Reverb host. With the tag, the site is routed on HTTP only — TLS is disabled since we can't obtain certs for domains we don't control.
 
 **Site with real custom domains alongside `.on-forge.com`:**
 Without this tag, the `.on-forge.com` domain is silently dropped from the Host() rule and the real domains are routed normally. With the tag, the `.on-forge.com` domain is included in the rule alongside the real ones.
@@ -198,7 +198,7 @@ Forge assigns every site an `.on-forge.com` subdomain (e.g. `myapp-abc123.on-for
 - Forge controls DNS and TLS for them — we can't obtain certs for them
 - Their DNS may not point to your load balancer
 
-Unless `traefik:forge-domain=true` is set, `.on-forge.com` records are dropped **before** the plugin decides whether a site has a main domain. A site with no other main domain falls back to its Forge site name, and gets no main router if that name is itself `.on-forge.com`; its Reverb router (below) is still created. Sites with real custom domains simply have the `.on-forge.com` entry dropped from their Host() rule. Use `traefik:forge-domain=true` to opt in if needed (see the site tags section below).
+Unless `traefik:forge-domain=true` is set, `.on-forge.com` records are dropped and do not count as a main domain. A site whose only main records are `.on-forge.com` gets no main router; the site-name fallback runs only when there are no main domain records at all. Its Reverb router (below) is still created. Sites with real custom domains simply have the `.on-forge.com` entry dropped from their Host() rule. Use `traefik:forge-domain=true` to opt in if needed (see the site tags section below).
 
 ---
 
@@ -228,7 +228,7 @@ If the Forge Reverb integration is enabled for a site (Sites → your site → I
 
 The Reverb router has no HTTP→HTTPS redirect (WebSocket clients don't follow redirects). All other settings (TLS, middlewares, entry points) match the main site.
 
-The Reverb router is created whenever the Reverb host has an enabled domain record, even if the site has no main router (for example, its only other domain is `.on-forge.com`). Leaving it out would make Traefik delete the router and free the hostname for another site's alias or domain record.
+The Reverb router is created whenever the Reverb host has an enabled domain record, even if the site has no main router (for example, its only other domain is `.on-forge.com`). Leaving it out would make Traefik delete the router and free the hostname for another site's alias or domain record. The router is one priority above `domainPriority` for that hostname, so a peer site that publishes the same name as an alias or a domain record does not win the tie.
 
 ---
 
