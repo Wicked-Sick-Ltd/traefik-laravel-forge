@@ -710,23 +710,26 @@ func TestOriginURL(t *testing.T) {
 }
 
 // fixedForge is a ForgeClient with one server and one site and no domains.
+// Slices are filled before the call and returned as stored. Building a
+// ForgeSite inside FetchSites panics under Yaegi.
 type fixedForge struct {
-	server ForgeServer
+	servers []ForgeServer
+	sites   map[string][]ForgeSite
 }
 
-func (f fixedForge) FetchServers() ([]ForgeServer, error) { return []ForgeServer{f.server}, nil }
-func (f fixedForge) FetchSites(string) ([]ForgeSite, error) {
-	return []ForgeSite{{
-		ID:   "site1",
-		Type: "sites",
-		Attributes: ForgeSiteAttributes{
-			Name:   "example.com",
-			Status: "installed",
-		},
-	}}, nil
+func forgeWith(server ForgeServer) *fixedForge {
+	f := &fixedForge{sites: map[string][]ForgeSite{}}
+	f.servers = append(f.servers, server)
+	f.sites[server.ID] = append(f.sites[server.ID], testSite("site1", "example.com"))
+	return f
 }
-func (fixedForge) FetchDomains(string, string) ([]ForgeDomain, error) { return nil, nil }
-func (fixedForge) FetchReverbIntegration(string, string) (*ForgeReverbIntegration, error) {
+
+func (f *fixedForge) FetchServers() ([]ForgeServer, error) { return f.servers, nil }
+func (f *fixedForge) FetchSites(serverID string) ([]ForgeSite, error) {
+	return f.sites[serverID], nil
+}
+func (f *fixedForge) FetchDomains(string, string) ([]ForgeDomain, error) { return nil, nil }
+func (f *fixedForge) FetchReverbIntegration(string, string) (*ForgeReverbIntegration, error) {
 	return nil, nil
 }
 
@@ -743,17 +746,13 @@ func serviceURL(t *testing.T, cfg *dynamic.Configuration) string {
 // outside RFC 1918 / ULA / loopback can still be published: an explicit https
 // scheme, or a cleartext CIDR the operator listed.
 func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
-	public := ForgeServer{
-		ID:   "s1",
-		Type: "servers",
-		Attributes: ForgeServerAttributes{
-			Name:      "app01",
-			IPAddress: "203.0.113.1",
-		},
-	}
+	public := ForgeServer{ID: "s1"}
+	public.Type = "servers"
+	public.Attributes.Name = "app01"
+	public.Attributes.IPAddress = "203.0.113.1"
 
 	t.Run("public address stays unpublished on http", func(t *testing.T) {
-		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, fixedForge{server: public})
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(public))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -769,7 +768,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 	t.Run("https scheme publishes a public address", func(t *testing.T) {
 		srv := public
 		srv.Attributes.Tags = []string{"traefik:upstream-scheme=https"}
-		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, fixedForge{server: srv})
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -789,7 +788,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 			"traefik:upstream-scheme=https",
 			"traefik:upstream-host=origin.example.com",
 		}
-		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, fixedForge{server: srv})
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -805,7 +804,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 			"traefik:upstream-scheme=https",
 			"traefik:upstream-host=origin.example.com\nforged",
 		}
-		p, err = NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, fixedForge{server: srv})
+		p, err = NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -824,7 +823,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 			"traefik:upstream-scheme=https",
 			"traefik:upstream-port=8443",
 		}
-		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, fixedForge{server: srv})
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -846,7 +845,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 				UpstreamHost:    "origin.example.com",
 				UpstreamScheme:  "https",
 			}},
-		}, fixedForge{server: public})
+		}, forgeWith(public))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -867,7 +866,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 			PollInterval:        "30s",
 			DefaultSitesEnabled: true,
 			CleartextCIDRs:      []string{"100.64.0.0/10"},
-		}, fixedForge{server: srv})
+		}, forgeWith(srv))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -884,7 +883,7 @@ func TestUpstreamOptInKeepsNonPrivateOriginsRoutable(t *testing.T) {
 		srv := public
 		srv.Attributes.IPAddress = ""
 		srv.Attributes.PrivateIPAddress = "100.64.1.5"
-		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, fixedForge{server: srv})
+		p, err := NewProviderWithClient(&Config{PollInterval: "30s", DefaultSitesEnabled: true}, forgeWith(srv))
 		if err != nil {
 			t.Fatal(err)
 		}
