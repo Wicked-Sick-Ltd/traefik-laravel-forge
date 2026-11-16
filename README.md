@@ -302,6 +302,8 @@ go run ./cmd/verify ... --json
 
 Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`.
 
+`--compare` only counts a generated rule as covering its hostnames when the rule is nothing but `Host(...)` / wildcard `HostRegexp(...)` clauses joined by `||`. A rule with any other matcher (for example a domain name or `traefik:aliases` value that injects `PathPrefix`) is listed under **REJECTED** with the offending clause, its hostnames are not counted as covered, and the command exits non-zero.
+
 ## Troubleshooting
 
 **No routes created**
