@@ -235,6 +235,45 @@ func TestParseServerTags(t *testing.T) {
 	}
 }
 
+// TestParseServerTagsUpstreamHostSafety pins the characters an upstream-host
+// tag may contain. A newline must not be copied into a log line, and a
+// bracketed IPv6 literal must still be used as the backend host.
+func TestParseServerTagsUpstreamHostSafety(t *testing.T) {
+	keys := []string{"upstream-host", "upstreamhost", "lb-host", "loadbalancer-host"}
+	rejected := []string{
+		"10.0.0.1\nforged",
+		"10.0.0.1\rforged",
+		"10.0.0.1\u2028forged",
+		"host:8080",
+		"2001:db8::1",
+		"[2001:db8::1]:80",
+		"10.0.0.1/24",
+		"user@host",
+		"[fe80::1%eth0]",
+		"[10.0.0.1]",
+	}
+	accepted := []struct{ value, want string }{
+		{"app-01.internal_lan", "app-01.internal_lan"},
+		{"10.0.1.10", "10.0.1.10"},
+		{"[2001:db8::1]", "[2001:db8::1]"},
+		{"[fd00::10]", "[fd00::10]"},
+	}
+	for _, key := range keys {
+		for _, value := range rejected {
+			got := ParseServerTags([]string{"traefik:" + key + "=" + value})
+			if got.UpstreamHost != "" {
+				t.Errorf("traefik:%s=%q accepted as %q", key, value, got.UpstreamHost)
+			}
+		}
+		for _, acc := range accepted {
+			got := ParseServerTags([]string{"traefik:" + key + "=" + acc.value})
+			if got.UpstreamHost != acc.want {
+				t.Errorf("traefik:%s=%q host = %q, want %q", key, acc.value, got.UpstreamHost, acc.want)
+			}
+		}
+	}
+}
+
 // -- buildHostRule unit tests --
 
 func TestBuildHostRule(t *testing.T) {

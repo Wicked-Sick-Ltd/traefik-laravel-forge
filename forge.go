@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -834,10 +835,14 @@ func parsePort(value string) (int, bool) {
 // "http://host:port". Tag values are set by any Forge member who can edit a
 // server, so anything outside hostname characters is refused: a newline would
 // split plugin log records, and ":", "/", "@" or "#" would change what the
-// backend URL points at.
+// backend URL points at. A bracketed IPv6 literal is the one exception, because
+// that is the form the backend URL already uses.
 func validUpstreamHost(value string) bool {
 	if value == "" || len(value) > 253 {
 		return false
+	}
+	if bracketedIPv6(value) {
+		return true
 	}
 	for _, r := range value {
 		if !isHostnameRune(r) {
@@ -845,6 +850,22 @@ func validUpstreamHost(value string) bool {
 		}
 	}
 	return true
+}
+
+// bracketedIPv6 reports whether value is an IPv6 address wrapped in [] so it
+// can be placed in a URL. A bare IPv6 address, a host:port pair and a zone ID
+// are refused: the first two do not build a usable backend URL, and a zone ID
+// is not a stable address to dial.
+func bracketedIPv6(value string) bool {
+	if len(value) < 4 || value[0] != '[' || value[len(value)-1] != ']' {
+		return false
+	}
+	inner := value[1 : len(value)-1]
+	if strings.Contains(inner, "%") {
+		return false
+	}
+	ip := net.ParseIP(inner)
+	return ip != nil && ip.To4() == nil
 }
 
 // isHostnameRune uses plain ifs on purpose: under Yaegi, a tagless switch with
@@ -883,7 +904,7 @@ func ParseServerTags(tags []string) ServerConfig {
 			if validUpstreamHost(value) {
 				cfg.UpstreamHost = value
 			} else {
-				pluginLog.Printf("Ignoring invalid traefik:%s=%q (want a hostname or IPv4 address)", key, value)
+				pluginLog.Printf("Ignoring invalid traefik:%s=%q (want a hostname, an IPv4 address, or a bracketed IPv6 address)", key, value)
 			}
 		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
 			if port, ok := parsePort(value); ok {

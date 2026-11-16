@@ -156,10 +156,11 @@ Override the IP address used to reach this server. By default the plugin uses `p
 traefik:upstream-host=10.0.1.10
 ```
 
-The value must be a hostname or IPv4 address: letters, digits, `.`, `-` and `_` only.
-Anything else (whitespace, a port, a path, an IPv6 literal) is ignored with a log line,
-and the server falls back to the `serverMappings` host or the auto-detected IP.
-Set the port with `traefik:upstream-port`.
+The value must be a hostname, an IPv4 address, or a bracketed IPv6 address
+(`[2001:db8::1]`). A hostname is letters, digits, `.`, `-` and `_` only.
+Anything else (whitespace, a port, a path, a bare IPv6 address, a zone ID) is
+ignored with a log line, and the server falls back to the `serverMappings` host
+or the auto-detected IP. Set the port with `traefik:upstream-port`.
 
 Aliases: `traefik:lb-host`, `traefik:loadbalancer-host`
 
