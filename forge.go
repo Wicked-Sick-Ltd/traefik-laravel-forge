@@ -445,34 +445,42 @@ func (p *Provider) processServer(
 
 // resolveUpstream determines the upstream host and port for a server using the
 // priority chain: server tag > server mapping > auto-detected Forge IP.
+// Host and port are resolved independently: a traefik:upstream-port tag applies
+// to whichever host wins, including a mapping host or the auto-detected IP.
 // Returns empty string for host if no IP is available.
 func (p *Provider) resolveUpstream(
 	server ForgeServer,
 	tagConfig ServerConfig,
 	mapping *ServerMapping,
 ) (host string, port int) {
-	port = 80
-
+	// Separate assignments, not `host, port = a, f()`: Yaegi drops the first
+	// value of a tuple assignment whose right-hand side includes a call.
 	switch {
 	case tagConfig.UpstreamHost != "":
-		return tagConfig.UpstreamHost, tagConfig.UpstreamPort
+		// A server that names its own host does not inherit the mapping's port.
+		host = tagConfig.UpstreamHost
+		port = tagConfig.UpstreamPort
 	case mapping != nil && mapping.UpstreamHost != "":
-		return mapping.UpstreamHost, mappingPort(mapping)
-	}
-
-	// A mapping may override only the port and leave the host to auto-detection.
-	if mapping != nil {
+		host = mapping.UpstreamHost
 		port = mappingPort(mapping)
+	default:
+		// A mapping may override only the port and leave the host to auto-detection.
+		port = 80
+		if mapping != nil {
+			port = mappingPort(mapping)
+		}
+		switch {
+		case server.Attributes.PrivateIPAddress != "":
+			host = server.Attributes.PrivateIPAddress
+		case server.Attributes.IPAddress != "":
+			host = server.Attributes.IPAddress
+		}
 	}
 
-	switch {
-	case server.Attributes.PrivateIPAddress != "":
-		return server.Attributes.PrivateIPAddress, port
-	case server.Attributes.IPAddress != "":
-		return server.Attributes.IPAddress, port
-	default:
-		return "", port
+	if tagConfig.UpstreamPortSet {
+		port = tagConfig.UpstreamPort
 	}
+	return host, port
 }
 
 // mappingPort returns the mapping's upstream port, defaulting to 80 when unset.
@@ -833,7 +841,10 @@ func parsePort(value string) (int, bool) {
 type ServerConfig struct {
 	UpstreamHost string
 	UpstreamPort int
-	TraefikID    string
+	// UpstreamPortSet distinguishes a valid traefik:upstream-port tag from the
+	// default of 80, so an explicit port 80 still outranks a mapping's port.
+	UpstreamPortSet bool
+	TraefikID       string
 }
 
 // ParseServerTags parses server tags and returns the resolved ServerConfig.
@@ -851,6 +862,7 @@ func ParseServerTags(tags []string) ServerConfig {
 		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
 			if port, ok := parsePort(value); ok {
 				cfg.UpstreamPort = port
+				cfg.UpstreamPortSet = true
 			} else {
 				pluginLog.Printf("Ignoring invalid traefik:upstream-port=%q (want 1-65535)", value)
 			}

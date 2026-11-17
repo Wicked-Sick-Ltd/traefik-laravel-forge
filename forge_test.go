@@ -165,17 +165,19 @@ func TestParseTagConfig(t *testing.T) {
 
 func TestParseServerTags(t *testing.T) {
 	tests := []struct {
-		name             string
-		tags             []string
-		wantUpstreamHost string
-		wantUpstreamPort int
-		wantTraefikID    string
+		name                string
+		tags                []string
+		wantUpstreamHost    string
+		wantUpstreamPort    int
+		wantUpstreamPortSet bool
+		wantTraefikID       string
 	}{
 		{
-			name:             "upstream host and port",
-			tags:             []string{"traefik:upstream-host=10.0.1.10", "traefik:upstream-port=8080"},
-			wantUpstreamHost: "10.0.1.10",
-			wantUpstreamPort: 8080,
+			name:                "upstream host and port",
+			tags:                []string{"traefik:upstream-host=10.0.1.10", "traefik:upstream-port=8080"},
+			wantUpstreamHost:    "10.0.1.10",
+			wantUpstreamPort:    8080,
+			wantUpstreamPortSet: true,
 		},
 		{
 			name:             "host only — port defaults to 80",
@@ -184,9 +186,27 @@ func TestParseServerTags(t *testing.T) {
 			wantUpstreamPort: 80,
 		},
 		{
-			name:             "port only — host empty",
-			tags:             []string{"traefik:upstream-port=9090"},
-			wantUpstreamPort: 9090,
+			name:                "port only — host empty",
+			tags:                []string{"traefik:upstream-port=9090"},
+			wantUpstreamPort:    9090,
+			wantUpstreamPortSet: true,
+		},
+		{
+			name:                "explicit port 80 still counts as set",
+			tags:                []string{"traefik:upstream-port=80"},
+			wantUpstreamPort:    80,
+			wantUpstreamPortSet: true,
+		},
+		{
+			name:             "invalid port is ignored and does not count as set",
+			tags:             []string{"traefik:upstream-port=80x"},
+			wantUpstreamPort: 80,
+		},
+		{
+			name:                "a later invalid port leaves the earlier valid one set",
+			tags:                []string{"traefik:upstream-port=9090", "traefik:upstream-port=999999"},
+			wantUpstreamPort:    9090,
+			wantUpstreamPortSet: true,
 		},
 		{
 			name:             "traefik-id",
@@ -206,16 +226,18 @@ func TestParseServerTags(t *testing.T) {
 			wantUpstreamPort: 80,
 		},
 		{
-			name:             "lb-host/lb-port aliases",
-			tags:             []string{"traefik:lb-host=10.0.0.1", "traefik:lb-port=3000"},
-			wantUpstreamHost: "10.0.0.1",
-			wantUpstreamPort: 3000,
+			name:                "lb-host/lb-port aliases",
+			tags:                []string{"traefik:lb-host=10.0.0.1", "traefik:lb-port=3000"},
+			wantUpstreamHost:    "10.0.0.1",
+			wantUpstreamPort:    3000,
+			wantUpstreamPortSet: true,
 		},
 		{
-			name:             "loadbalancer aliases",
-			tags:             []string{"traefik:loadbalancer-host=10.0.0.2", "traefik:loadbalancer-port=4000"},
-			wantUpstreamHost: "10.0.0.2",
-			wantUpstreamPort: 4000,
+			name:                "loadbalancer aliases",
+			tags:                []string{"traefik:loadbalancer-host=10.0.0.2", "traefik:loadbalancer-port=4000"},
+			wantUpstreamHost:    "10.0.0.2",
+			wantUpstreamPort:    4000,
+			wantUpstreamPortSet: true,
 		},
 	}
 
@@ -227,6 +249,9 @@ func TestParseServerTags(t *testing.T) {
 			}
 			if got.UpstreamPort != tt.wantUpstreamPort {
 				t.Errorf("UpstreamPort = %d, want %d", got.UpstreamPort, tt.wantUpstreamPort)
+			}
+			if got.UpstreamPortSet != tt.wantUpstreamPortSet {
+				t.Errorf("UpstreamPortSet = %v, want %v", got.UpstreamPortSet, tt.wantUpstreamPortSet)
 			}
 			if got.TraefikID != tt.wantTraefikID {
 				t.Errorf("TraefikID = %q, want %q", got.TraefikID, tt.wantTraefikID)
@@ -627,6 +652,37 @@ func TestResolveUpstream(t *testing.T) {
 			server:   noIP,
 			tag:      ServerConfig{UpstreamPort: 80},
 			wantHost: "",
+			wantPort: 80,
+		},
+		{
+			name:     "port tag with no host tag applies to the auto-detected host",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 9090, UpstreamPortSet: true},
+			wantHost: "10.0.0.1",
+			wantPort: 9090,
+		},
+		{
+			name:     "port tag outranks a mapping host's port",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 9090, UpstreamPortSet: true},
+			mapping:  &ServerMapping{UpstreamHost: "192.168.0.1", UpstreamPort: 8080},
+			wantHost: "192.168.0.1",
+			wantPort: 9090,
+		},
+		{
+			name:     "port tag outranks a port-only mapping",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 9090, UpstreamPortSet: true},
+			mapping:  &ServerMapping{ForgeServerName: "app01", UpstreamPort: 8080},
+			wantHost: "10.0.0.1",
+			wantPort: 9090,
+		},
+		{
+			name:     "explicit port 80 outranks a mapping port",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 80, UpstreamPortSet: true},
+			mapping:  &ServerMapping{UpstreamHost: "192.168.0.1", UpstreamPort: 8080},
+			wantHost: "192.168.0.1",
 			wantPort: 80,
 		},
 	}
