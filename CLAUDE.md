@@ -103,6 +103,18 @@ log line instead of aborting.
 
 When adding a new Forge call, decide which of those two categories it is in.
 
+### The per-site store is a fallback, never a cache
+
+`siteLookupFor` keeps each site's last good domains and Reverb host, but every
+poll still calls `/domains` and `/integrations/reverb`. The stored copy is used
+only when Forge refuses the fetch. Serving it while Forge is answering keeps a
+removed or moved hostname routed to the old backend, and covered by its cert
+resolver, until the copy is replaced — that was a vulnerability, not an
+optimisation. `cacheTTL` only switches the fallback on (positive) or off (`0s`).
+Entries a completed poll did not route are pruned, so a re-enabled site cannot
+come back on records from before it was disabled. If the request volume is a
+problem, raise `pollInterval`; do not skip fetches.
+
 ### "Not there" and "not answered" are different
 
 `fetchRaw` must not collapse every non-200 into `(nil, nil)`. An empty result is a

@@ -164,6 +164,7 @@ type Provider struct {
 
 	lookupMu sync.Mutex
 	lookups  map[string]siteLookup
+	pollGen  uint64
 
 	mu     sync.Mutex
 	cancel func()
@@ -373,11 +374,13 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 
 	pluginLog.Printf("Fetched %d servers from Forge", len(servers))
 
+	p.beginPoll()
 	for _, server := range servers {
 		if err := p.processServer(server, configuration, redirectMiddlewareName); err != nil {
 			return nil, err
 		}
 	}
+	p.pruneLookups()
 
 	return configuration, nil
 }
@@ -550,11 +553,11 @@ func (p *Provider) processSite(
 		return nil
 	}
 
-	// Domains and the Reverb integration come from the cache. These two calls are
-	// the bulk of a poll's request volume (two per site), and caching them keeps
-	// the burst small enough to stay inside Forge's 60 requests/minute. A domains
-	// failure with nothing cached is still fatal to the poll: falling back to the
-	// site name would silently swap every real customer hostname for the Forge one.
+	// Domains and the Reverb integration are fetched on every poll, so a hostname
+	// removed from or moved off this site in Forge leaves on the next poll. The
+	// previous answer is only used when Forge refuses the fetch. A domains failure
+	// with no previous answer is still fatal to the poll: falling back to the site
+	// name would silently swap every real customer hostname for the Forge one.
 	lookup, err := p.siteLookupFor(serverID, site)
 	if err != nil {
 		return err
