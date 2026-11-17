@@ -300,7 +300,9 @@ go run ./cmd/verify ... --dump
 go run ./cmd/verify ... --json
 ```
 
-Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`.
+Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `--http-redirect`, `--redirect-middleware`. Turn a boolean flag off with `--flag=false`. A following word, as in `--default-sites-enabled false`, is a positional argument and is rejected.
+
+The Forge API token is read only from the `FORGE_TOKEN` environment variable; there is no flag for it. Any local user can read a running process's command line, but only its owner can read its environment, so never put the token in the arguments.
 
 ## Troubleshooting
 

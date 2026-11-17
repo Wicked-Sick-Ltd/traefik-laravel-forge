@@ -164,6 +164,10 @@ FORGE_TOKEN=xxx FORGE_ORG=wickedsick go run ./cmd/verify \
   --http-redirect
 ```
 
+The token is read only from `FORGE_TOKEN`. Do not add a flag for it: any local user
+can read a process's command line from `/proc/<pid>/cmdline`, but only the owner can
+read its environment.
+
 Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config.
 
 Dump output files (`dump*.json`, `verify.out`) are gitignored.
