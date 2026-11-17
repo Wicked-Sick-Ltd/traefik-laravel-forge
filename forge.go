@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"slices"
 	"strconv"
@@ -434,7 +435,8 @@ func (p *Provider) processServer(
 		return nil
 	}
 
-	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
+	pluginLog.Printf("Processing server %q -> %q", server.Attributes.Name,
+		fmt.Sprintf("http://%s:%d", upstreamHost, upstreamPort))
 
 	for _, site := range sites {
 		if err := p.processSite(
@@ -603,7 +605,7 @@ func (p *Provider) processSite(
 		},
 	}
 
-	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
+	pluginLog.Printf("Created %d router(s) for site %q -> %q", routersCreated, site.Attributes.Name, siteBackendURL)
 
 	// Reverb domains route through the same Nginx backend as the main site.
 	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
@@ -613,7 +615,7 @@ func (p *Provider) processSite(
 		noRedirectTags.HTTPRedirect = false
 		for _, rd := range reverbDomains {
 			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
-				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %q (via Nginx)",
 					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
 			}
 		}
@@ -871,6 +873,58 @@ func parsePort(value string) (int, bool) {
 	return port, true
 }
 
+// validUpstreamHost reports whether value can stand alone as the host in
+// "http://host:port". Tag values are set by any Forge member who can edit a
+// server, so anything outside hostname characters is refused: a newline would
+// split plugin log records, and ":", "/", "@" or "#" would change what the
+// backend URL points at. A bracketed IPv6 literal is the one exception, because
+// that is the form the backend URL already uses.
+func validUpstreamHost(value string) bool {
+	if value == "" || len(value) > 253 {
+		return false
+	}
+	if bracketedIPv6(value) {
+		return true
+	}
+	for _, r := range value {
+		if !isHostnameRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// bracketedIPv6 reports whether value is an IPv6 address wrapped in [] so it
+// can be placed in a URL. A bare IPv6 address, a host:port pair and a zone ID
+// are refused: the first two do not build a usable backend URL, and a zone ID
+// is not a stable address to dial.
+func bracketedIPv6(value string) bool {
+	if len(value) < 4 || value[0] != '[' || value[len(value)-1] != ']' {
+		return false
+	}
+	inner := value[1 : len(value)-1]
+	if strings.Contains(inner, "%") {
+		return false
+	}
+	ip := net.ParseIP(inner)
+	return ip != nil && ip.To4() == nil
+}
+
+// isHostnameRune uses plain ifs on purpose: under Yaegi, a tagless switch with
+// empty multi-expression cases fell through to default and rejected valid hosts.
+func isHostnameRune(r rune) bool {
+	if r >= 'a' && r <= 'z' {
+		return true
+	}
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	return r == '.' || r == '-' || r == '_'
+}
+
 // ServerConfig holds configuration parsed from server-level tags.
 type ServerConfig struct {
 	UpstreamHost string
@@ -892,7 +946,11 @@ func ParseServerTags(tags []string) ServerConfig {
 		}
 		switch key {
 		case "upstream-host", "upstreamhost", "lb-host", "loadbalancer-host":
-			cfg.UpstreamHost = value
+			if validUpstreamHost(value) {
+				cfg.UpstreamHost = value
+			} else {
+				pluginLog.Printf("Ignoring invalid traefik:%s=%q (want a hostname, an IPv4 address, or a bracketed IPv6 address)", key, value)
+			}
 		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
 			if port, ok := parsePort(value); ok {
 				cfg.UpstreamPort = port
