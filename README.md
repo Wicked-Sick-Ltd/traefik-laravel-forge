@@ -220,6 +220,8 @@ The plugin fetches all domain records for each site. Domain types:
 - `alias` — additional domains, included in the Host() rule
 - `reverb` — Laravel Reverb WebSocket domain, gets its own router (see below)
 
+Hostnames are lowercased and have one trailing dot removed before they are routed, matching how Traefik compares `Host` rules, and each hostname is routed to one site only. A hostname another site already serves is not routed for a second site. See [Hostname normalisation and ownership](TAG_CONFIGURATION.md#hostname-normalisation-and-ownership).
+
 **`.on-forge.com` domains are excluded by default.** Forge assigns every site an `.on-forge.com` subdomain, but Forge controls DNS and TLS for these — the plugin can't obtain certs for them and their DNS may not point to your load balancer. Sites where `.on-forge.com` is the only domain are skipped entirely. Use `traefik:forge-domain=true` to opt in (routes HTTP only, no TLS).
 
 If a primary domain has **wildcard subdomains enabled** in Forge, a `HostRegexp` clause is automatically appended:

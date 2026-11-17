@@ -70,6 +70,16 @@ HostRegexp(`^[^.]+\.example\.com$`)
 ```
 Traefik v2 uses named groups (`{subdomain:[a-z]+}.example.com`) which is incompatible. The plugin is v3-only.
 
+### Every hostname goes through `canonicalHost` and ownership resolution
+
+Traefik's `Host` matcher is case-insensitive and ignores one trailing dot, so
+`Shop.Example.com` and `shop.example.com.` match the same requests as
+`shop.example.com`. Any hostname that reaches a rule, router name or
+`domainPriority` must be the output of `canonicalHost`, and must be claimed in the
+site's `sitePlan` so `resolveHostOwners` can give it to one site only. Building a
+`Host(...)` rule from a raw Forge name or tag lets one site take another site's
+traffic.
+
 ### API is JSON:API
 
 All responses use the [JSON:API](https://jsonapi.org) envelope format with `data`, `included`, `links`, `meta`. Related resources (like tags) come in `included` and are referenced by ID from `relationships`. The `fetchForgeServersRaw` and `fetchForgeSitesRaw` methods handle this.
