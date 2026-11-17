@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,15 @@ import (
 // Go's default logger writes to stderr, which Traefik surfaces as level=error —
 // incorrect for informational polling messages.
 var pluginLog = log.New(os.Stdout, "", 0) //nolint:gochecknoglobals
+
+const (
+	// httpEntryPoint is the cleartext entrypoint HTTP→HTTPS redirect routers listen on.
+	httpEntryPoint = "web"
+	// httpsEntryPoint is the default entrypoint for TLS routers.
+	httpsEntryPoint = "websecure"
+	// defaultRedirectMiddleware is the redirect middleware the plugin defines itself.
+	defaultRedirectMiddleware = "forge-https-redirect"
+)
 
 // ServerMapping maps a Forge server to an upstream backend.
 type ServerMapping struct {
@@ -352,13 +362,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	// Auto-create the redirect middleware when httpRedirect is on and no external one is named.
 	redirectMiddlewareName := p.redirectMiddleware
 	if p.httpRedirect && redirectMiddlewareName == "" {
-		redirectMiddlewareName = "forge-https-redirect"
-		configuration.HTTP.Middlewares[redirectMiddlewareName] = &dynamic.Middleware{
-			RedirectScheme: &dynamic.RedirectScheme{
-				Scheme:    "https",
-				Permanent: true,
-			},
-		}
+		redirectMiddlewareName = ensureRedirectMiddleware(configuration)
 	}
 
 	servers, err := p.client.FetchServers()
@@ -678,9 +682,9 @@ func createRouter(
 	entryPoints := tags.EntryPoints
 	if len(entryPoints) == 0 {
 		if enableTLS {
-			entryPoints = []string{"websecure"}
+			entryPoints = []string{httpsEntryPoint}
 		} else {
-			entryPoints = []string{"web"}
+			entryPoints = []string{httpEntryPoint}
 		}
 	}
 
@@ -699,18 +703,48 @@ func createRouter(
 	}
 	configuration.HTTP.Routers[routerName] = router
 
-	if tags.HTTPRedirect && enableTLS {
-		httpRouter := &dynamic.Router{
-			EntryPoints: []string{"web"},
-			Service:     serviceName,
-			Rule:        rule,
-			Priority:    priority,
-		}
-		if redirectMiddlewareName != "" {
-			httpRouter.Middlewares = []string{redirectMiddlewareName}
-		}
-		configuration.HTTP.Routers[routerName+"-http"] = httpRouter
+	if !tags.HTTPRedirect || !enableTLS {
+		return
 	}
+	// The redirect router listens on the public HTTP entrypoint. Skip it only
+	// when the site is not on a public entrypoint at all. websecure is the
+	// public TLS entrypoint (and the default), so a tag that lists it still
+	// gets the redirect. A tag that names only something else, such as an
+	// internal entrypoint, keeps the hostname off port 80.
+	if len(tags.EntryPoints) > 0 &&
+		!slices.Contains(tags.EntryPoints, httpEntryPoint) &&
+		!slices.Contains(tags.EntryPoints, httpsEntryPoint) {
+		pluginLog.Printf("Skipping HTTP redirect router for %q: entrypoints %v include neither %q nor %q",
+			routerName, tags.EntryPoints, httpEntryPoint, httpsEntryPoint)
+		return
+	}
+	// A site-level http-redirect tag can enable this router when the global
+	// redirect middleware was never created. Without a middleware the router
+	// would proxy the origin in cleartext, so always attach one.
+	if redirectMiddlewareName == "" {
+		redirectMiddlewareName = ensureRedirectMiddleware(configuration)
+	}
+	configuration.HTTP.Routers[routerName+"-http"] = &dynamic.Router{
+		EntryPoints: []string{httpEntryPoint},
+		Service:     serviceName,
+		Rule:        rule,
+		Middlewares: []string{redirectMiddlewareName},
+		Priority:    priority,
+	}
+}
+
+// ensureRedirectMiddleware defines the plugin's own HTTP→HTTPS redirect
+// middleware in configuration (if not already present) and returns its name.
+func ensureRedirectMiddleware(configuration *dynamic.Configuration) string {
+	if _, ok := configuration.HTTP.Middlewares[defaultRedirectMiddleware]; !ok {
+		configuration.HTTP.Middlewares[defaultRedirectMiddleware] = &dynamic.Middleware{
+			RedirectScheme: &dynamic.RedirectScheme{
+				Scheme:    "https",
+				Permanent: true,
+			},
+		}
+	}
+	return defaultRedirectMiddleware
 }
 
 // classifyDomains partitions enabled domain records into main domains and Reverb
