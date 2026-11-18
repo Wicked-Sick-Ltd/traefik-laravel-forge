@@ -167,6 +167,11 @@ type Provider struct {
 	lookups  map[string]siteLookup
 	pollGen  uint64
 
+	// recordRouters names routers built from a Forge domain or Reverb record
+	// during this poll. Alias routers are absent, so a tag cannot outrank the
+	// site that holds the hostname.
+	recordRouters map[string]struct{}
+
 	mu     sync.Mutex
 	cancel func()
 }
@@ -376,12 +381,13 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	pluginLog.Printf("Fetched %d servers from Forge", len(servers))
 
 	p.beginPoll()
+	p.recordRouters = map[string]struct{}{}
 	for _, server := range servers {
 		if err := p.processServer(server, configuration, redirectMiddlewareName); err != nil {
 			return nil, err
 		}
 	}
-	dropContestedHosts(configuration)
+	dropContestedHosts(configuration, p.recordRouters)
 	p.pruneLookups()
 
 	return configuration, nil
@@ -683,9 +689,10 @@ func (p *Provider) createDomainRouter(
 		noTLSTags := tags
 		noTLSTags.EnableTLS = false
 		noTLSTags.CertResolver = ""
-		createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
-			fmt.Sprintf("Host(`%s`)", name), serviceName, noTLSTags,
+		routerName := fmt.Sprintf("forge-%s-%s", siteID, name)
+		createRouter(routerName, fmt.Sprintf("Host(`%s`)", name), serviceName, noTLSTags,
 			false, "", domainPriority(name), configuration, redirectMiddlewareName)
+		p.noteRecordRouter(routerName)
 		return true
 	}
 
@@ -700,10 +707,18 @@ func (p *Provider) createDomainRouter(
 		hosts = append(hosts, "www."+name)
 	}
 
-	createRouter(fmt.Sprintf("forge-%s-%s", siteID, name),
-		buildHostRule(hosts, wildcardHosts), serviceName, tags,
+	routerName := fmt.Sprintf("forge-%s-%s", siteID, name)
+	createRouter(routerName, buildHostRule(hosts, wildcardHosts), serviceName, tags,
 		tags.EnableTLS, tags.CertResolver, domainPriority(name), configuration, redirectMiddlewareName)
+	p.noteRecordRouter(routerName)
 	return true
+}
+
+func (p *Provider) noteRecordRouter(name string) {
+	if p.recordRouters == nil {
+		p.recordRouters = map[string]struct{}{}
+	}
+	p.recordRouters[name] = struct{}{}
 }
 
 // createRouter writes a router (and optional HTTP redirect router) into configuration.
@@ -1024,29 +1039,33 @@ func domainPriority(domain string) int {
 }
 
 // hostClaim is one site's exact Host() on one router.
+// record is true when that router came from a Forge domain or Reverb record.
 type hostClaim struct {
 	siteID string
 	router string
 	eps    []string
+	record bool
 }
 
-// dropContestedHosts leaves a hostname with the lowest numeric site id on each
-// entry point it shares. A site that still wins one of its entry points keeps
-// the router and loses only the entry points it lost. A site's own second
-// router is not a contest. Only a rule part that is exactly Host(`name`) counts.
-// Hostnames are compared case-insensitively, with one trailing dot removed.
-func dropContestedHosts(configuration *dynamic.Configuration) {
+// dropContestedHosts gives a hostname to the site that holds its domain or
+// Reverb record. A traefik:aliases router cannot remove that site's router or
+// its HTTP redirect. Two record holders are not split across entry points: the
+// lowest numeric site id that publishes TLS keeps every entry point it already
+// has, and the others lose the host. Alias-only overlaps, with no record, stay
+// per entry point. A site's own second router is not a contest. Only a rule
+// part that is exactly Host(`name`) counts. Hostnames are compared
+// case-insensitively, with one trailing dot removed.
+func dropContestedHosts(configuration *dynamic.Configuration, records map[string]struct{}) {
 	if configuration == nil || configuration.HTTP == nil {
 		return
 	}
 	claims := map[string][]hostClaim{}
-	siteOf := map[string]string{}
 	for name, router := range configuration.HTTP.Routers {
 		if strings.HasSuffix(name, "-http") || router == nil {
 			continue
 		}
 		siteID := siteIDFromRouter(name, router.Rule)
-		siteOf[name] = siteID
+		_, isRecord := records[name]
 		eps := append([]string{}, router.EntryPoints...)
 		if httpRouter := configuration.HTTP.Routers[name+"-http"]; httpRouter != nil {
 			for _, ep := range httpRouter.EntryPoints {
@@ -1060,24 +1079,44 @@ func dropContestedHosts(configuration *dynamic.Configuration) {
 				siteID: siteID,
 				router: name,
 				eps:    eps,
+				record: isRecord,
 			})
 		}
 	}
 	// drop[router] is the set of hosts to remove from that router.
+	// split is the alias-only contests still settled per entry point.
 	drop := map[string]map[string]bool{}
+	split := map[string][]hostClaim{}
 	for host, list := range claims {
+		if preferred, ok := preferredRecordOwner(list); ok {
+			var kept, lost []string
+			for _, c := range list {
+				if c.siteID == preferred {
+					kept = append(kept, c.siteID)
+					continue
+				}
+				lost = append(lost, c.siteID)
+				markHostDrop(drop, c.router, host)
+			}
+			if len(lost) == 0 {
+				continue
+			}
+			sort.Strings(lost)
+			sort.Strings(kept)
+			pluginLog.Printf("Host %q stays with site %s; not publishing it for %s",
+				host, strings.Join(uniqueStrings(kept), ", "), strings.Join(uniqueStrings(lost), ", "))
+			continue
+		}
 		losers := losingSites(list)
 		if len(losers) == 0 {
 			continue
 		}
+		split[host] = list
 		var kept, lost []string
 		for _, c := range list {
 			if losers[c.siteID] {
 				lost = append(lost, c.siteID)
-				if drop[c.router] == nil {
-					drop[c.router] = map[string]bool{}
-				}
-				drop[c.router][host] = true
+				markHostDrop(drop, c.router, host)
 				continue
 			}
 			kept = append(kept, c.siteID)
@@ -1112,7 +1151,46 @@ func dropContestedHosts(configuration *dynamic.Configuration) {
 		}
 		router.Rule = rule
 	}
-	trimLostEntryPoints(configuration, claims)
+	trimLostEntryPoints(configuration, split)
+}
+
+func markHostDrop(drop map[string]map[string]bool, router, host string) {
+	if drop[router] == nil {
+		drop[router] = map[string]bool{}
+	}
+	drop[router][host] = true
+}
+
+// preferredRecordOwner is the site that holds the domain or Reverb record.
+// The lowest numeric id that publishes TLS wins, so web and websecure stay on
+// one upstream and the HTTP redirect stays with that TLS router. With no TLS
+// record, the lowest numeric id wins. ok is false when no claim is a record.
+func preferredRecordOwner(list []hostClaim) (string, bool) {
+	var tlsOwner, anyOwner string
+	hasTLS, hasAny := false, false
+	for _, c := range list {
+		if !c.record {
+			continue
+		}
+		if !hasAny || siteIDLess(c.siteID, anyOwner) {
+			anyOwner = c.siteID
+			hasAny = true
+		}
+		if !slices.Contains(c.eps, httpsEntryPoint) {
+			continue
+		}
+		if !hasTLS || siteIDLess(c.siteID, tlsOwner) {
+			tlsOwner = c.siteID
+			hasTLS = true
+		}
+	}
+	if !hasAny {
+		return "", false
+	}
+	if hasTLS {
+		return tlsOwner, true
+	}
+	return anyOwner, true
 }
 
 // trimLostEntryPoints removes entry points a site lost while still winning

@@ -998,7 +998,7 @@ func TestSameSiteWWWAliasIsNotAContest(t *testing.T) {
 	}
 }
 
-func TestDisjointEntrypointsAreNotAContest(t *testing.T) {
+func TestDomainRecordsAreNotSplitAcrossUpstreams(t *testing.T) {
 	server := appServer()
 	web := namedSite("a", "shop.example.com", []string{"traefik:entrypoints=web", "traefik:tls=false"})
 	secure := namedSite("b", "shop.example.com", []string{"traefik:entrypoints=websecure", "traefik:tls=true"})
@@ -1010,8 +1010,11 @@ func TestDisjointEntrypointsAreNotAContest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTP.Routers["forge-a-shop.example.com"] == nil || cfg.HTTP.Routers["forge-b-shop.example.com"] == nil {
-		t.Fatal("disjoint entry points were treated as one contest")
+	if cfg.HTTP.Routers["forge-a-shop.example.com"] != nil {
+		t.Fatal("cleartext record still publishes a host the TLS record also holds")
+	}
+	if cfg.HTTP.Routers["forge-b-shop.example.com"] == nil {
+		t.Fatal("TLS record lost the host")
 	}
 }
 
@@ -1181,10 +1184,55 @@ func TestRedirectWinDoesNotBlankEntrypoints(t *testing.T) {
 		}
 	}
 	if cfg.HTTP.Routers["forge-1-shop.example.com"] == nil {
-		t.Fatal("lower id lost websecure")
+		t.Fatal("TLS record lost websecure")
+	}
+	if cfg.HTTP.Routers["forge-2-shop.example.com"] != nil || cfg.HTTP.Routers["forge-2-shop.example.com-http"] != nil {
+		t.Fatal("the other record still publishes the host on a second upstream")
+	}
+}
+
+func TestAliasOnlyOverlapStaysWithLowestSiteID(t *testing.T) {
+	server := appServer()
+	lower := namedSite("1", "one.example.com", []string{"traefik:aliases=shop.example.com"})
+	higher := namedSite("2", "two.example.com", []string{"traefik:aliases=shop.example.com"})
+	domains := map[string][]ForgeDomain{}
+	domains["1"] = append(domains["1"], enabledDomain("one.example.com"))
+	domains["2"] = append(domains["2"], enabledDomain("two.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{lower, higher}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-1-shop.example.com"] == nil {
+		t.Fatal("alias-only overlap dropped the lower site id")
+	}
+	if cfg.HTTP.Routers["forge-2-shop.example.com"] != nil {
+		t.Fatal("alias-only overlap kept the higher site id")
+	}
+}
+
+func TestAliasDoesNotTakeDomainRecord(t *testing.T) {
+	server := appServer()
+	alias := namedSite("1", "other.example.com", []string{"traefik:aliases=shop.example.com"})
+	owner := namedSite("2", "shop.example.com", nil)
+	domains := map[string][]ForgeDomain{}
+	domains["1"] = append(domains["1"], enabledDomain("other.example.com"))
+	domains["2"] = append(domains["2"], enabledDomain("shop.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{alias, owner}, domains, nil))
+	p.defaultCertResolver = testResolver
+	p.httpRedirect = true
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-2-shop.example.com"] == nil {
+		t.Fatal("domain record lost its HTTPS router to a lower-id alias")
 	}
 	if cfg.HTTP.Routers["forge-2-shop.example.com-http"] == nil {
-		t.Fatal("redirect router was removed from the site that won web")
+		t.Fatal("domain record lost its HTTP redirect to a lower-id alias")
+	}
+	if cfg.HTTP.Routers["forge-1-shop.example.com"] != nil || cfg.HTTP.Routers["forge-1-shop.example.com-http"] != nil {
+		t.Fatal("alias router published a hostname held by another site's domain record")
 	}
 }
 
