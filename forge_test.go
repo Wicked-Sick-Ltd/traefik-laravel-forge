@@ -1211,6 +1211,39 @@ func TestAliasOnlyOverlapStaysWithLowestSiteID(t *testing.T) {
 	}
 }
 
+func TestAliasOverlapDropsTheSharedEntrypoint(t *testing.T) {
+	server := appServer()
+	webOnly := namedSite("1", "one.example.com", []string{"traefik:tls=false", "traefik:aliases=shop.example.com"})
+	both := namedSite("2", "two.example.com", []string{
+		"traefik:entrypoints=web,websecure",
+		"traefik:tls=true",
+		"traefik:http-redirect=false",
+		"traefik:aliases=shop.example.com",
+	})
+	domains := map[string][]ForgeDomain{}
+	domains["1"] = append(domains["1"], enabledDomain("one.example.com"))
+	domains["2"] = append(domains["2"], enabledDomain("two.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{webOnly, both}, domains, nil))
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := cfg.HTTP.Routers["forge-1-shop.example.com"]
+	higher := cfg.HTTP.Routers["forge-2-shop.example.com"]
+	if lower == nil || !slices.Contains(lower.EntryPoints, "web") {
+		t.Fatal("the web-only alias lost the entry point it won")
+	}
+	if higher == nil || !slices.Contains(higher.EntryPoints, "websecure") {
+		t.Fatal("the alias that also listens on websecure lost that entry point")
+	}
+	if slices.Contains(higher.EntryPoints, "web") {
+		t.Fatalf("shared web stayed on both aliases: %v", higher.EntryPoints)
+	}
+	if cfg.HTTP.Routers["forge-1-one.example.com"] == nil || cfg.HTTP.Routers["forge-2-two.example.com"] == nil {
+		t.Fatal("uncontested names were dropped with the shared entry point")
+	}
+}
+
 func TestAliasDoesNotTakeDomainRecord(t *testing.T) {
 	server := appServer()
 	alias := namedSite("1", "other.example.com", []string{"traefik:aliases=shop.example.com"})

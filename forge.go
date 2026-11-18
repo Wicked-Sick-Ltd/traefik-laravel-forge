@@ -1107,11 +1107,14 @@ func dropContestedHosts(configuration *dynamic.Configuration, records map[string
 				host, strings.Join(uniqueStrings(kept), ", "), strings.Join(uniqueStrings(lost), ", "))
 			continue
 		}
+		// A site that still won another entry point is not a loser, but it must
+		// lose the entry points it did not win. Trim those even when nobody
+		// lost the hostname outright.
 		losers := losingSites(list)
+		split[host] = list
 		if len(losers) == 0 {
 			continue
 		}
-		split[host] = list
 		var kept, lost []string
 		for _, c := range list {
 			if losers[c.siteID] {
@@ -1126,7 +1129,7 @@ func dropContestedHosts(configuration *dynamic.Configuration, records map[string
 		pluginLog.Printf("Host %q stays with site %s; not publishing it for %s",
 			host, strings.Join(uniqueStrings(kept), ", "), strings.Join(uniqueStrings(lost), ", "))
 	}
-	if len(drop) == 0 {
+	if len(drop) == 0 && len(split) == 0 {
 		return
 	}
 	for name, router := range configuration.HTTP.Routers {
