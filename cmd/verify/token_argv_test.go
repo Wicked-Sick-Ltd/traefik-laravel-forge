@@ -172,7 +172,7 @@ func sudoNobodyWorks() bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "sudo", "-n", "-u", "nobody", "true").Run() == nil //nolint:gosec // probes whether this machine can read another user's proc entry
+	return exec.CommandContext(ctx, "sudo", "-n", "-u", "nobody", "true").Run() == nil
 }
 
 func assertCommandLineTokenRejected(t *testing.T, got verifyResult) {
