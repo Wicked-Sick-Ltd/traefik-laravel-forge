@@ -23,10 +23,11 @@ const defaultCacheTTL = 10 * time.Minute
 // completed poll did not touch are dropped, so a site that stops being routed
 // cannot later come back on records from before it left.
 type siteLookup struct {
-	domains    []ForgeDomain
-	reverbHost string
-	fetchedAt  time.Time
-	poll       uint64
+	domains        []ForgeDomain
+	reverbHost     string
+	reverbResolved bool
+	fetchedAt      time.Time
+	poll           uint64
 }
 
 // parseCacheTTL turns the configured cacheTTL into a duration. An empty value
@@ -54,9 +55,12 @@ func cacheKey(serverID, siteID string) string { return serverID + "/" + siteID }
 //     previous poll did, which is also what aborting the poll would leave.
 //   - domains fetch fails with nothing held: return the error so the caller
 //     aborts the poll rather than emitting a config missing this site.
-//   - Reverb fetch fails: never fatal. It only identifies which of the fresh
-//     domains belongs to Reverb, and that traffic reaches the same Nginx
-//     backend regardless, so the last Reverb host Forge returned stands in.
+//   - Reverb fetch fails: reverbResolved stays false unless a previous answer
+//     is held. A caller that would send the site to a different port keeps it
+//     on the server upstream for this poll, so an unidentified WebSocket
+//     hostname is not sent to the app and the rest of the poll still finishes.
+//     With no port override, or with a previous answer, the last host stands
+//     in and the domain stays on the same Nginx backend as the other routers.
 func (p *Provider) siteLookupFor(serverID string, site ForgeSite) (siteLookup, error) {
 	key := cacheKey(serverID, site.ID)
 	fallback := p.cacheTTL > 0
@@ -80,9 +84,15 @@ func (p *Provider) siteLookupFor(serverID string, site ForgeSite) (siteLookup, e
 	reverbHost, reverbResolved := p.fetchReverbHost(serverID, site)
 	if !reverbResolved && hadPrevious {
 		reverbHost = previous.reverbHost
+		reverbResolved = previous.reverbResolved
 	}
 
-	entry := siteLookup{domains: domains, reverbHost: reverbHost, fetchedAt: p.clock()}
+	entry := siteLookup{
+		domains:        domains,
+		reverbHost:     reverbHost,
+		reverbResolved: reverbResolved,
+		fetchedAt:      p.clock(),
+	}
 	if fallback {
 		p.storeLookup(key, entry)
 	}
@@ -90,8 +100,9 @@ func (p *Provider) siteLookupFor(serverID string, site ForgeSite) (siteLookup, e
 }
 
 // fetchReverbHost returns the site's Reverb host and whether the call answered.
-// We only need the host to identify which domain record belongs to Reverb —
-// traffic routes to Nginx, which proxies the WebSocket internally.
+// A false answer is not the same as an empty host: an empty host means Forge
+// said this site has no Reverb integration. Traffic for a known Reverb host
+// routes to Nginx, which proxies the WebSocket internally.
 func (p *Provider) fetchReverbHost(serverID string, site ForgeSite) (string, bool) {
 	reverb, err := p.client.FetchReverbIntegration(serverID, site.ID)
 	if err != nil {

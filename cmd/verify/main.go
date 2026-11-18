@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	forge "github.com/Wicked-Sick-Ltd/traefik-laravel-forge"
@@ -43,6 +44,7 @@ func main() {
 	httpRedirect := flag.Bool("http-redirect", false, "Generate HTTP->HTTPS redirect routers")
 	redirectMiddleware := flag.String("redirect-middleware", "", "Name of redirect middleware to use with http-redirect")
 	traefikID := flag.String("traefik-id", "", "Only process servers tagged traefik:traefik-id=<value> (for multi-LB setups)")
+	allowedSitePorts := flag.String("allowed-site-ports", "", "Comma-separated ports a traefik:port site tag may select (e.g. 3000,8080)")
 	comparePath := flag.String("compare", "", "Path to existing Traefik dynamic config file (.yml) to compare against")
 	jsonOut := flag.Bool("json", false, "Output generated config as JSON")
 	dumpRaw := flag.Bool("dump", false, "Dump raw Forge API responses as JSON (useful for inspecting available fields)")
@@ -80,9 +82,20 @@ func main() {
 	cfg.RedirectMiddleware = *redirectMiddleware
 	cfg.TraefikID = *traefikID
 
+	ports, err := parsePortList(*allowedSitePorts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: -allowed-site-ports: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.AllowedSitePorts = ports
+
 	provider, err := forge.New(context.Background(), cfg, "verify")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating provider: %v\n", err)
+		os.Exit(1)
+	}
+	if err = provider.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -234,6 +247,23 @@ func main() {
 			fmt.Println()
 		}
 	}
+}
+
+// parsePortList parses a comma-separated list of ports such as "3000,8080".
+func parsePortList(value string) ([]int, error) {
+	var ports []int
+	for _, field := range strings.Split(value, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		port, err := strconv.Atoi(field)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port %q", field)
+		}
+		ports = append(ports, port)
+	}
+	return ports, nil
 }
 
 type routerInfo struct {

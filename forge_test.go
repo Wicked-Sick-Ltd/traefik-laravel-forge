@@ -113,6 +113,38 @@ func TestInitPollIntervalValid(t *testing.T) {
 	}
 }
 
+func TestInitAllowedSitePorts(t *testing.T) {
+	tests := []struct {
+		name    string
+		ports   []int
+		wantErr bool
+	}{
+		{name: "unset", ports: nil},
+		{name: "valid ports", ports: []int{3000, 8080}},
+		{name: "zero", ports: []int{3000, 0}, wantErr: true},
+		{name: "above range", ports: []int{65536}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := CreateConfig()
+			config.APIToken = testAPIToken
+			config.Organization = testOrganization
+			config.AllowedSitePorts = tt.ports
+			p, err := New(context.Background(), config, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = p.Init()
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected Init error for allowedSitePorts=%v", tt.ports)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected Init error for allowedSitePorts=%v: %v", tt.ports, err)
+			}
+		})
+	}
+}
+
 func TestTraefikIDStoredOnProvider(t *testing.T) {
 	config := CreateConfig()
 	config.PollInterval = "10s"
@@ -451,10 +483,32 @@ func TestParseSiteTags(t *testing.T) {
 		}
 	})
 
-	t.Run("port override", func(t *testing.T) {
+	t.Run("port override not in allowlist is ignored", func(t *testing.T) {
 		got := parseSiteTags([]string{"traefik:port=3000"}, defaults)
+		if got.Port != 80 {
+			t.Errorf("Port = %d, want 80", got.Port)
+		}
+	})
+
+	t.Run("port override in allowlist", func(t *testing.T) {
+		allowed := defaults
+		allowed.AllowedPorts = []int{3000, 8080}
+		got := parseSiteTags([]string{"traefik:port=3000"}, allowed)
 		if got.Port != 3000 {
 			t.Errorf("Port = %d, want 3000", got.Port)
+		}
+		got = parseSiteTags([]string{"traefik:port=6379"}, allowed)
+		if got.Port != 80 {
+			t.Errorf("Port = %d, want 80 for a port outside the allowlist", got.Port)
+		}
+	})
+
+	t.Run("port override equal to default is accepted", func(t *testing.T) {
+		serverPort := defaults
+		serverPort.Port = 8080
+		got := parseSiteTags([]string{"traefik:port=8080"}, serverPort)
+		if got.Port != 8080 {
+			t.Errorf("Port = %d, want 8080", got.Port)
 		}
 	})
 
