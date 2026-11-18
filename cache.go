@@ -7,21 +7,26 @@ import (
 )
 
 // defaultCacheTTL is used when cacheTTL is omitted from the plugin config.
-// Domain records and Reverb integrations change rarely, so a long TTL is safe.
+// Any positive value keeps each site's last good answer as a fallback for a
+// refused fetch; zero turns the fallback off.
 const defaultCacheTTL = 10 * time.Minute
 
-// siteLookup is the cached result of the two per-site Forge calls.
+// siteLookup is a site's domain records and Reverb host as Forge last returned
+// them.
 //
-// reverbResolved records whether the Reverb half actually answered. A Reverb
-// failure is not fatal, so the entry is still cached for its domains — but the
-// failure itself must not be cached for a full TTL, or one transient 429 would
-// misclassify the Reverb domain for up to 2*TTL. Before this cache existed that
-// self-corrected on the next poll, and it still must.
+// It is only ever a fallback for a fetch Forge refused. Every poll asks Forge
+// again: serving a stored list while Forge is answering would keep a hostname
+// that was removed from a site, or moved to another one, routed to the old
+// backend and covered by its cert resolver until the entry aged out.
+//
+// poll is the generation of the last poll that routed the site. Entries a
+// completed poll did not touch are dropped, so a site that stops being routed
+// cannot later come back on records from before it left.
 type siteLookup struct {
-	domains        []ForgeDomain
-	reverbHost     string
-	reverbResolved bool
-	expiresAt      time.Time
+	domains    []ForgeDomain
+	reverbHost string
+	fetchedAt  time.Time
+	poll       uint64
 }
 
 // parseCacheTTL turns the configured cacheTTL into a duration. An empty value
@@ -41,79 +46,44 @@ func parseCacheTTL(raw string) (time.Duration, error) {
 // cacheKey identifies one site's lookup entry.
 func cacheKey(serverID, siteID string) string { return serverID + "/" + siteID }
 
-// jitterFraction derives a stable value in [0,1000) from a key using FNV-1a.
-//
-// Expiry is jittered because the whole point of the cache is to shrink the
-// per-poll request burst. If every entry were written with the same TTL they
-// would all fall due on the same cycle and rebuild the very burst that trips
-// Forge's 60 requests/minute limit. Deriving the offset from the key rather
-// than a random source keeps it deterministic, and so testable.
-func jitterFraction(key string) int64 {
-	var h uint32 = 2166136261
-	for i := 0; i < len(key); i++ {
-		h ^= uint32(key[i])
-		h *= 16777619
-	}
-	return int64(h % 1000)
-}
-
-// expiryFor spreads an entry's expiry across [TTL, 2*TTL).
-func (p *Provider) expiryFor(key string, from time.Time) time.Time {
-	spread := time.Duration(jitterFraction(key) * int64(p.cacheTTL) / 1000)
-	return from.Add(p.cacheTTL + spread)
-}
-
-// siteLookupFor returns a site's domain records and Reverb host, serving a
-// cached entry while it is still fresh.
+// siteLookupFor fetches a site's domain records and Reverb host from Forge.
 //
 // Error policy, which mirrors the surrounding poll semantics:
-//   - domains fetch fails and we hold any previous value, even an expired one:
-//     serve it and let the poll succeed. Traefik keeps routing the site.
-//   - domains fetch fails with nothing cached: return the error so the caller
+//   - domains fetch fails and we hold this site's last good answer: serve it
+//     and let the poll succeed. Traefik keeps routing the site exactly as the
+//     previous poll did, which is also what aborting the poll would leave.
+//   - domains fetch fails with nothing held: return the error so the caller
 //     aborts the poll rather than emitting a config missing this site.
-//   - Reverb fetch fails: never fatal. It only identifies which domain belongs
-//     to Reverb, and that traffic reaches the same Nginx backend regardless.
+//   - Reverb fetch fails: never fatal. It only identifies which of the fresh
+//     domains belongs to Reverb, and that traffic reaches the same Nginx
+//     backend regardless, so the last Reverb host Forge returned stands in.
 func (p *Provider) siteLookupFor(serverID string, site ForgeSite) (siteLookup, error) {
 	key := cacheKey(serverID, site.ID)
-	now := p.clock()
-	caching := p.cacheTTL > 0
-
-	cached, hadCached := p.cachedLookup(key)
-	if caching && hadCached && now.Before(cached.expiresAt) {
-		if cached.reverbResolved {
-			return cached, nil
-		}
-		// Domains are still fresh, but Reverb never answered. Retry just that
-		// half rather than waiting out the whole TTL.
-		return p.refreshReverb(key, serverID, site, cached), nil
-	}
+	fallback := p.cacheTTL > 0
+	previous, hadPrevious := p.cachedLookup(key)
 
 	domains, err := p.client.FetchDomains(serverID, site.ID)
 	if err != nil {
-		// Only a usable cached value lets the poll continue. With caching off
-		// there is nothing legitimate to fall back on, so the error propagates.
-		if caching && hadCached {
+		// With the fallback off there is nothing legitimate to serve, so the
+		// error propagates.
+		if fallback && hadPrevious {
 			fmt.Fprintf(os.Stderr,
-				"forge: domains fetch failed for site %q, reusing cached records: %v\n",
-				site.Attributes.Name, err)
-			return cached, nil
+				"forge: domains fetch failed for site %q, reusing its records from %s ago: %v\n",
+				site.Attributes.Name, p.clock().Sub(previous.fetchedAt).Round(time.Second), err)
+			p.storeLookup(key, previous)
+			return previous, nil
 		}
 		return siteLookup{}, fmt.Errorf("failed to fetch domains for site %q: %w",
 			site.Attributes.Name, err)
 	}
 
 	reverbHost, reverbResolved := p.fetchReverbHost(serverID, site)
-	if !reverbResolved && hadCached {
-		reverbHost = cached.reverbHost
+	if !reverbResolved && hadPrevious {
+		reverbHost = previous.reverbHost
 	}
 
-	entry := siteLookup{
-		domains:        domains,
-		reverbHost:     reverbHost,
-		reverbResolved: reverbResolved,
-		expiresAt:      p.expiryFor(key, now),
-	}
-	if caching {
+	entry := siteLookup{domains: domains, reverbHost: reverbHost, fetchedAt: p.clock()}
+	if fallback {
 		p.storeLookup(key, entry)
 	}
 	return entry, nil
@@ -135,19 +105,28 @@ func (p *Provider) fetchReverbHost(serverID string, site ForgeSite) (string, boo
 	return reverb.Host, true
 }
 
-// refreshReverb retries only the Reverb half of an otherwise-fresh entry,
-// leaving the cached domains and expiry untouched.
-func (p *Provider) refreshReverb(
-	key, serverID string, site ForgeSite, cached siteLookup,
-) siteLookup {
-	host, resolved := p.fetchReverbHost(serverID, site)
-	if !resolved {
-		return cached
+// beginPoll starts a new generation for the entries the coming poll touches.
+func (p *Provider) beginPoll() {
+	p.lookupMu.Lock()
+	defer p.lookupMu.Unlock()
+	p.pollGen++
+}
+
+// pruneLookups drops every entry the poll that just completed did not route.
+// Call it only after a successful poll: an aborted one has not visited every
+// site, and the entries it skipped are still the fallback for the next poll.
+func (p *Provider) pruneLookups() {
+	p.lookupMu.Lock()
+	defer p.lookupMu.Unlock()
+	var stale []string
+	for key, entry := range p.lookups {
+		if entry.poll != p.pollGen {
+			stale = append(stale, key)
+		}
 	}
-	cached.reverbHost = host
-	cached.reverbResolved = true
-	p.storeLookup(key, cached)
-	return cached
+	for _, key := range stale {
+		delete(p.lookups, key)
+	}
 }
 
 func (p *Provider) cachedLookup(key string) (siteLookup, bool) {
@@ -163,6 +142,7 @@ func (p *Provider) storeLookup(key string, entry siteLookup) {
 	if p.lookups == nil {
 		p.lookups = map[string]siteLookup{}
 	}
+	entry.poll = p.pollGen
 	p.lookups[key] = entry
 }
 

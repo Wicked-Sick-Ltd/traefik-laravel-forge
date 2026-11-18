@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +22,15 @@ import (
 // Go's default logger writes to stderr, which Traefik surfaces as level=error —
 // incorrect for informational polling messages.
 var pluginLog = log.New(os.Stdout, "", 0) //nolint:gochecknoglobals
+
+const (
+	// httpEntryPoint is the cleartext entrypoint HTTP→HTTPS redirect routers listen on.
+	httpEntryPoint = "web"
+	// httpsEntryPoint is the default entrypoint for TLS routers.
+	httpsEntryPoint = "websecure"
+	// defaultRedirectMiddleware is the redirect middleware the plugin defines itself.
+	defaultRedirectMiddleware = "forge-https-redirect"
+)
 
 // ServerMapping maps a Forge server to an upstream backend.
 type ServerMapping struct {
@@ -153,6 +164,7 @@ type Provider struct {
 
 	lookupMu sync.Mutex
 	lookups  map[string]siteLookup
+	pollGen  uint64
 
 	mu     sync.Mutex
 	cancel func()
@@ -352,13 +364,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	// Auto-create the redirect middleware when httpRedirect is on and no external one is named.
 	redirectMiddlewareName := p.redirectMiddleware
 	if p.httpRedirect && redirectMiddlewareName == "" {
-		redirectMiddlewareName = "forge-https-redirect"
-		configuration.HTTP.Middlewares[redirectMiddlewareName] = &dynamic.Middleware{
-			RedirectScheme: &dynamic.RedirectScheme{
-				Scheme:    "https",
-				Permanent: true,
-			},
-		}
+		redirectMiddlewareName = ensureRedirectMiddleware(configuration)
 	}
 
 	servers, err := p.client.FetchServers()
@@ -368,11 +374,13 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 
 	pluginLog.Printf("Fetched %d servers from Forge", len(servers))
 
+	p.beginPoll()
 	for _, server := range servers {
 		if err := p.processServer(server, configuration, redirectMiddlewareName); err != nil {
 			return nil, err
 		}
 	}
+	p.pruneLookups()
 
 	return configuration, nil
 }
@@ -430,7 +438,8 @@ func (p *Provider) processServer(
 		return nil
 	}
 
-	pluginLog.Printf("Processing server %q -> http://%s:%d", server.Attributes.Name, upstreamHost, upstreamPort)
+	pluginLog.Printf("Processing server %q -> %q", server.Attributes.Name,
+		fmt.Sprintf("http://%s:%d", upstreamHost, upstreamPort))
 
 	for _, site := range sites {
 		if err := p.processSite(
@@ -445,34 +454,42 @@ func (p *Provider) processServer(
 
 // resolveUpstream determines the upstream host and port for a server using the
 // priority chain: server tag > server mapping > auto-detected Forge IP.
+// Host and port are resolved independently: a traefik:upstream-port tag applies
+// to whichever host wins, including a mapping host or the auto-detected IP.
 // Returns empty string for host if no IP is available.
 func (p *Provider) resolveUpstream(
 	server ForgeServer,
 	tagConfig ServerConfig,
 	mapping *ServerMapping,
 ) (host string, port int) {
-	port = 80
-
+	// Separate assignments, not `host, port = a, f()`: Yaegi drops the first
+	// value of a tuple assignment whose right-hand side includes a call.
 	switch {
 	case tagConfig.UpstreamHost != "":
-		return tagConfig.UpstreamHost, tagConfig.UpstreamPort
+		// A server that names its own host does not inherit the mapping's port.
+		host = tagConfig.UpstreamHost
+		port = tagConfig.UpstreamPort
 	case mapping != nil && mapping.UpstreamHost != "":
-		return mapping.UpstreamHost, mappingPort(mapping)
-	}
-
-	// A mapping may override only the port and leave the host to auto-detection.
-	if mapping != nil {
+		host = mapping.UpstreamHost
 		port = mappingPort(mapping)
+	default:
+		// A mapping may override only the port and leave the host to auto-detection.
+		port = 80
+		if mapping != nil {
+			port = mappingPort(mapping)
+		}
+		switch {
+		case server.Attributes.PrivateIPAddress != "":
+			host = server.Attributes.PrivateIPAddress
+		case server.Attributes.IPAddress != "":
+			host = server.Attributes.IPAddress
+		}
 	}
 
-	switch {
-	case server.Attributes.PrivateIPAddress != "":
-		return server.Attributes.PrivateIPAddress, port
-	case server.Attributes.IPAddress != "":
-		return server.Attributes.IPAddress, port
-	default:
-		return "", port
+	if tagConfig.UpstreamPortSet {
+		port = tagConfig.UpstreamPort
 	}
+	return host, port
 }
 
 // mappingPort returns the mapping's upstream port, defaulting to 80 when unset.
@@ -536,11 +553,11 @@ func (p *Provider) processSite(
 		return nil
 	}
 
-	// Domains and the Reverb integration come from the cache. These two calls are
-	// the bulk of a poll's request volume (two per site), and caching them keeps
-	// the burst small enough to stay inside Forge's 60 requests/minute. A domains
-	// failure with nothing cached is still fatal to the poll: falling back to the
-	// site name would silently swap every real customer hostname for the Forge one.
+	// Domains and the Reverb integration are fetched on every poll, so a hostname
+	// removed from or moved off this site in Forge leaves on the next poll. The
+	// previous answer is only used when Forge refuses the fetch. A domains failure
+	// with no previous answer is still fatal to the poll: falling back to the site
+	// name would silently swap every real customer hostname for the Forge one.
 	lookup, err := p.siteLookupFor(serverID, site)
 	if err != nil {
 		return err
@@ -591,7 +608,7 @@ func (p *Provider) processSite(
 		},
 	}
 
-	pluginLog.Printf("Created %d router(s) for site %q -> %s", routersCreated, site.Attributes.Name, siteBackendURL)
+	pluginLog.Printf("Created %d router(s) for site %q -> %q", routersCreated, site.Attributes.Name, siteBackendURL)
 
 	// Reverb domains route through the same Nginx backend as the main site.
 	// Nginx handles the WebSocket proxy internally via its Forge-configured location.
@@ -601,7 +618,7 @@ func (p *Provider) processSite(
 		noRedirectTags.HTTPRedirect = false
 		for _, rd := range reverbDomains {
 			if p.createDomainRouter(site.ID, rd, serviceName, noRedirectTags, configuration, redirectMiddlewareName) {
-				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %s (via Nginx)",
+				pluginLog.Printf("Created Reverb router for site %q domain=%q -> %q (via Nginx)",
 					site.Attributes.Name, rd.Attributes.Name, siteBackendURL)
 			}
 		}
@@ -670,9 +687,9 @@ func createRouter(
 	entryPoints := tags.EntryPoints
 	if len(entryPoints) == 0 {
 		if enableTLS {
-			entryPoints = []string{"websecure"}
+			entryPoints = []string{httpsEntryPoint}
 		} else {
-			entryPoints = []string{"web"}
+			entryPoints = []string{httpEntryPoint}
 		}
 	}
 
@@ -691,18 +708,48 @@ func createRouter(
 	}
 	configuration.HTTP.Routers[routerName] = router
 
-	if tags.HTTPRedirect && enableTLS {
-		httpRouter := &dynamic.Router{
-			EntryPoints: []string{"web"},
-			Service:     serviceName,
-			Rule:        rule,
-			Priority:    priority,
-		}
-		if redirectMiddlewareName != "" {
-			httpRouter.Middlewares = []string{redirectMiddlewareName}
-		}
-		configuration.HTTP.Routers[routerName+"-http"] = httpRouter
+	if !tags.HTTPRedirect || !enableTLS {
+		return
 	}
+	// The redirect router listens on the public HTTP entrypoint. Skip it only
+	// when the site is not on a public entrypoint at all. websecure is the
+	// public TLS entrypoint (and the default), so a tag that lists it still
+	// gets the redirect. A tag that names only something else, such as an
+	// internal entrypoint, keeps the hostname off port 80.
+	if len(tags.EntryPoints) > 0 &&
+		!slices.Contains(tags.EntryPoints, httpEntryPoint) &&
+		!slices.Contains(tags.EntryPoints, httpsEntryPoint) {
+		pluginLog.Printf("Skipping HTTP redirect router for %q: entrypoints %v include neither %q nor %q",
+			routerName, tags.EntryPoints, httpEntryPoint, httpsEntryPoint)
+		return
+	}
+	// A site-level http-redirect tag can enable this router when the global
+	// redirect middleware was never created. Without a middleware the router
+	// would proxy the origin in cleartext, so always attach one.
+	if redirectMiddlewareName == "" {
+		redirectMiddlewareName = ensureRedirectMiddleware(configuration)
+	}
+	configuration.HTTP.Routers[routerName+"-http"] = &dynamic.Router{
+		EntryPoints: []string{httpEntryPoint},
+		Service:     serviceName,
+		Rule:        rule,
+		Middlewares: []string{redirectMiddlewareName},
+		Priority:    priority,
+	}
+}
+
+// ensureRedirectMiddleware defines the plugin's own HTTP→HTTPS redirect
+// middleware in configuration (if not already present) and returns its name.
+func ensureRedirectMiddleware(configuration *dynamic.Configuration) string {
+	if _, ok := configuration.HTTP.Middlewares[defaultRedirectMiddleware]; !ok {
+		configuration.HTTP.Middlewares[defaultRedirectMiddleware] = &dynamic.Middleware{
+			RedirectScheme: &dynamic.RedirectScheme{
+				Scheme:    "https",
+				Permanent: true,
+			},
+		}
+	}
+	return defaultRedirectMiddleware
 }
 
 // classifyDomains partitions enabled domain records into main domains and Reverb
@@ -829,11 +876,66 @@ func parsePort(value string) (int, bool) {
 	return port, true
 }
 
+// validUpstreamHost reports whether value can stand alone as the host in
+// "http://host:port". Tag values are set by any Forge member who can edit a
+// server, so anything outside hostname characters is refused: a newline would
+// split plugin log records, and ":", "/", "@" or "#" would change what the
+// backend URL points at. A bracketed IPv6 literal is the one exception, because
+// that is the form the backend URL already uses.
+func validUpstreamHost(value string) bool {
+	if value == "" || len(value) > 253 {
+		return false
+	}
+	if bracketedIPv6(value) {
+		return true
+	}
+	for _, r := range value {
+		if !isHostnameRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// bracketedIPv6 reports whether value is an IPv6 address wrapped in [] so it
+// can be placed in a URL. A bare IPv6 address, a host:port pair and a zone ID
+// are refused: the first two do not build a usable backend URL, and a zone ID
+// is not a stable address to dial.
+func bracketedIPv6(value string) bool {
+	if len(value) < 4 || value[0] != '[' || value[len(value)-1] != ']' {
+		return false
+	}
+	inner := value[1 : len(value)-1]
+	if strings.Contains(inner, "%") {
+		return false
+	}
+	ip := net.ParseIP(inner)
+	return ip != nil && ip.To4() == nil
+}
+
+// isHostnameRune uses plain ifs on purpose: under Yaegi, a tagless switch with
+// empty multi-expression cases fell through to default and rejected valid hosts.
+func isHostnameRune(r rune) bool {
+	if r >= 'a' && r <= 'z' {
+		return true
+	}
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	return r == '.' || r == '-' || r == '_'
+}
+
 // ServerConfig holds configuration parsed from server-level tags.
 type ServerConfig struct {
 	UpstreamHost string
 	UpstreamPort int
-	TraefikID    string
+	// UpstreamPortSet distinguishes a valid traefik:upstream-port tag from the
+	// default of 80, so an explicit port 80 still outranks a mapping's port.
+	UpstreamPortSet bool
+	TraefikID       string
 }
 
 // ParseServerTags parses server tags and returns the resolved ServerConfig.
@@ -847,10 +949,15 @@ func ParseServerTags(tags []string) ServerConfig {
 		}
 		switch key {
 		case "upstream-host", "upstreamhost", "lb-host", "loadbalancer-host":
-			cfg.UpstreamHost = value
+			if validUpstreamHost(value) {
+				cfg.UpstreamHost = value
+			} else {
+				pluginLog.Printf("Ignoring invalid traefik:%s=%q (want a hostname, an IPv4 address, or a bracketed IPv6 address)", key, value)
+			}
 		case "upstream-port", "upstreamport", "lb-port", "loadbalancer-port":
 			if port, ok := parsePort(value); ok {
 				cfg.UpstreamPort = port
+				cfg.UpstreamPortSet = true
 			} else {
 				pluginLog.Printf("Ignoring invalid traefik:upstream-port=%q (want 1-65535)", value)
 			}

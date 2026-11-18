@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/traefik/genconf/dynamic"
 )
 
 const (
@@ -165,17 +167,19 @@ func TestParseTagConfig(t *testing.T) {
 
 func TestParseServerTags(t *testing.T) {
 	tests := []struct {
-		name             string
-		tags             []string
-		wantUpstreamHost string
-		wantUpstreamPort int
-		wantTraefikID    string
+		name                string
+		tags                []string
+		wantUpstreamHost    string
+		wantUpstreamPort    int
+		wantUpstreamPortSet bool
+		wantTraefikID       string
 	}{
 		{
-			name:             "upstream host and port",
-			tags:             []string{"traefik:upstream-host=10.0.1.10", "traefik:upstream-port=8080"},
-			wantUpstreamHost: "10.0.1.10",
-			wantUpstreamPort: 8080,
+			name:                "upstream host and port",
+			tags:                []string{"traefik:upstream-host=10.0.1.10", "traefik:upstream-port=8080"},
+			wantUpstreamHost:    "10.0.1.10",
+			wantUpstreamPort:    8080,
+			wantUpstreamPortSet: true,
 		},
 		{
 			name:             "host only — port defaults to 80",
@@ -184,9 +188,27 @@ func TestParseServerTags(t *testing.T) {
 			wantUpstreamPort: 80,
 		},
 		{
-			name:             "port only — host empty",
-			tags:             []string{"traefik:upstream-port=9090"},
-			wantUpstreamPort: 9090,
+			name:                "port only — host empty",
+			tags:                []string{"traefik:upstream-port=9090"},
+			wantUpstreamPort:    9090,
+			wantUpstreamPortSet: true,
+		},
+		{
+			name:                "explicit port 80 still counts as set",
+			tags:                []string{"traefik:upstream-port=80"},
+			wantUpstreamPort:    80,
+			wantUpstreamPortSet: true,
+		},
+		{
+			name:             "invalid port is ignored and does not count as set",
+			tags:             []string{"traefik:upstream-port=80x"},
+			wantUpstreamPort: 80,
+		},
+		{
+			name:                "a later invalid port leaves the earlier valid one set",
+			tags:                []string{"traefik:upstream-port=9090", "traefik:upstream-port=999999"},
+			wantUpstreamPort:    9090,
+			wantUpstreamPortSet: true,
 		},
 		{
 			name:             "traefik-id",
@@ -206,16 +228,18 @@ func TestParseServerTags(t *testing.T) {
 			wantUpstreamPort: 80,
 		},
 		{
-			name:             "lb-host/lb-port aliases",
-			tags:             []string{"traefik:lb-host=10.0.0.1", "traefik:lb-port=3000"},
-			wantUpstreamHost: "10.0.0.1",
-			wantUpstreamPort: 3000,
+			name:                "lb-host/lb-port aliases",
+			tags:                []string{"traefik:lb-host=10.0.0.1", "traefik:lb-port=3000"},
+			wantUpstreamHost:    "10.0.0.1",
+			wantUpstreamPort:    3000,
+			wantUpstreamPortSet: true,
 		},
 		{
-			name:             "loadbalancer aliases",
-			tags:             []string{"traefik:loadbalancer-host=10.0.0.2", "traefik:loadbalancer-port=4000"},
-			wantUpstreamHost: "10.0.0.2",
-			wantUpstreamPort: 4000,
+			name:                "loadbalancer aliases",
+			tags:                []string{"traefik:loadbalancer-host=10.0.0.2", "traefik:loadbalancer-port=4000"},
+			wantUpstreamHost:    "10.0.0.2",
+			wantUpstreamPort:    4000,
+			wantUpstreamPortSet: true,
 		},
 	}
 
@@ -228,10 +252,52 @@ func TestParseServerTags(t *testing.T) {
 			if got.UpstreamPort != tt.wantUpstreamPort {
 				t.Errorf("UpstreamPort = %d, want %d", got.UpstreamPort, tt.wantUpstreamPort)
 			}
+			if got.UpstreamPortSet != tt.wantUpstreamPortSet {
+				t.Errorf("UpstreamPortSet = %v, want %v", got.UpstreamPortSet, tt.wantUpstreamPortSet)
+			}
 			if got.TraefikID != tt.wantTraefikID {
 				t.Errorf("TraefikID = %q, want %q", got.TraefikID, tt.wantTraefikID)
 			}
 		})
+	}
+}
+
+// TestParseServerTagsUpstreamHostSafety pins the characters an upstream-host
+// tag may contain. A newline must not be copied into a log line, and a
+// bracketed IPv6 literal must still be used as the backend host.
+func TestParseServerTagsUpstreamHostSafety(t *testing.T) {
+	keys := []string{"upstream-host", "upstreamhost", "lb-host", "loadbalancer-host"}
+	rejected := []string{
+		"10.0.0.1\nforged",
+		"10.0.0.1\rforged",
+		"10.0.0.1\u2028forged",
+		"host:8080",
+		"2001:db8::1",
+		"[2001:db8::1]:80",
+		"10.0.0.1/24",
+		"user@host",
+		"[fe80::1%eth0]",
+		"[10.0.0.1]",
+	}
+	accepted := []struct{ value, want string }{
+		{"app-01.internal_lan", "app-01.internal_lan"},
+		{"10.0.1.10", "10.0.1.10"},
+		{"[2001:db8::1]", "[2001:db8::1]"},
+		{"[fd00::10]", "[fd00::10]"},
+	}
+	for _, key := range keys {
+		for _, value := range rejected {
+			got := ParseServerTags([]string{"traefik:" + key + "=" + value})
+			if got.UpstreamHost != "" {
+				t.Errorf("traefik:%s=%q accepted as %q", key, value, got.UpstreamHost)
+			}
+		}
+		for _, acc := range accepted {
+			got := ParseServerTags([]string{"traefik:" + key + "=" + acc.value})
+			if got.UpstreamHost != acc.want {
+				t.Errorf("traefik:%s=%q host = %q, want %q", key, acc.value, got.UpstreamHost, acc.want)
+			}
+		}
 	}
 }
 
@@ -629,6 +695,37 @@ func TestResolveUpstream(t *testing.T) {
 			wantHost: "",
 			wantPort: 80,
 		},
+		{
+			name:     "port tag with no host tag applies to the auto-detected host",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 9090, UpstreamPortSet: true},
+			wantHost: "10.0.0.1",
+			wantPort: 9090,
+		},
+		{
+			name:     "port tag outranks a mapping host's port",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 9090, UpstreamPortSet: true},
+			mapping:  &ServerMapping{UpstreamHost: "192.168.0.1", UpstreamPort: 8080},
+			wantHost: "192.168.0.1",
+			wantPort: 9090,
+		},
+		{
+			name:     "port tag outranks a port-only mapping",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 9090, UpstreamPortSet: true},
+			mapping:  &ServerMapping{ForgeServerName: "app01", UpstreamPort: 8080},
+			wantHost: "10.0.0.1",
+			wantPort: 9090,
+		},
+		{
+			name:     "explicit port 80 outranks a mapping port",
+			server:   bothIPs,
+			tag:      ServerConfig{UpstreamPort: 80, UpstreamPortSet: true},
+			mapping:  &ServerMapping{UpstreamHost: "192.168.0.1", UpstreamPort: 8080},
+			wantHost: "192.168.0.1",
+			wantPort: 80,
+		},
 	}
 
 	for _, tt := range tests {
@@ -643,6 +740,85 @@ func TestResolveUpstream(t *testing.T) {
 			}
 		})
 	}
+}
+
+func emptyHTTPConfig() *dynamic.Configuration {
+	return &dynamic.Configuration{
+		HTTP: &dynamic.HTTPConfiguration{
+			Routers:     map[string]*dynamic.Router{},
+			Services:    map[string]*dynamic.Service{},
+			Middlewares: map[string]*dynamic.Middleware{},
+		},
+	}
+}
+
+// TestHTTPRedirectRouterFollowsPublicEntrypoints pins when the -http router is
+// emitted. websecure is the public TLS entry point, so a site tagged with only
+// that name keeps its redirect. A site tagged with only an internal entry point
+// does not, and a site-level redirect with no global middleware still attaches
+// forge-https-redirect.
+func TestHTTPRedirectRouterFollowsPublicEntrypoints(t *testing.T) {
+	const routerName = "forge-1-example.com"
+
+	t.Run("websecure only keeps the redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			EntryPoints:  []string{httpsEntryPoint},
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "https-redirect")
+		httpRouter := cfg.HTTP.Routers[routerName+"-http"]
+		if httpRouter == nil {
+			t.Fatal("websecure-only site has no HTTP redirect router")
+		}
+		if len(httpRouter.EntryPoints) != 1 || httpRouter.EntryPoints[0] != httpEntryPoint {
+			t.Errorf("redirect entrypoints = %v", httpRouter.EntryPoints)
+		}
+		if len(httpRouter.Middlewares) != 1 || httpRouter.Middlewares[0] != "https-redirect" {
+			t.Errorf("redirect middlewares = %v", httpRouter.Middlewares)
+		}
+	})
+
+	t.Run("internal only skips the redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			EntryPoints:  []string{"internal"},
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "https-redirect")
+		if _, ok := cfg.HTTP.Routers[routerName+"-http"]; ok {
+			t.Fatal("internal-only site published an HTTP redirect router")
+		}
+		if cfg.HTTP.Routers[routerName] == nil {
+			t.Fatal("main router was not created")
+		}
+	})
+
+	t.Run("websecure plus internal keeps the redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			EntryPoints:  []string{httpsEntryPoint, "internal"},
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "https-redirect")
+		if cfg.HTTP.Routers[routerName+"-http"] == nil {
+			t.Fatal("site on websecure lost its HTTP redirect router")
+		}
+	})
+
+	t.Run("site redirect without a global middleware attaches forge-https-redirect", func(t *testing.T) {
+		cfg := emptyHTTPConfig()
+		createRouter(routerName, "Host(`example.com`)", "svc", siteTagConfig{
+			HTTPRedirect: true,
+		}, true, "cloudflare", 100, cfg, "")
+		httpRouter := cfg.HTTP.Routers[routerName+"-http"]
+		if httpRouter == nil {
+			t.Fatal("unset entrypoints dropped the HTTP redirect router")
+		}
+		if len(httpRouter.Middlewares) != 1 || httpRouter.Middlewares[0] != defaultRedirectMiddleware {
+			t.Errorf("middlewares = %v, want [%s]", httpRouter.Middlewares, defaultRedirectMiddleware)
+		}
+		if cfg.HTTP.Middlewares[defaultRedirectMiddleware] == nil {
+			t.Fatal("forge-https-redirect middleware was not defined")
+		}
+	})
 }
 
 // -- Lifecycle --

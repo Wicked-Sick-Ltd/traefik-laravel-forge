@@ -1,3 +1,30 @@
+<!-- PORTFOLIO_STATE:START company=Wicked Sick hash=e8c78c23 last_sync=2026-11-16T07:05Z -->
+## Portfolio context (auto-generated — do not edit between the markers)
+
+Repo company: **Wicked Sick**. Full inventory at `wicked-repo-inventory/PORTFOLIO_STATE.md` (canonical in Notion → Engineering Inventory).
+
+**Secrets:** API credentials live in 1Password (Wicked Sick account), never in committed files. Map env vars to `op://vault/item/field` references in a committed `.env.op` (paths only, no secret values) and run via `op run --env-file=.env.op -- <cmd>` so secrets exist only for that process. Don't hardcode keys or commit real values.
+
+**Reusable drop-ins** (use these before building from scratch):
+- `acsendr-billing` — Provider-agnostic subscription billing with idempotent webhooks, a two-sided revenue-share ledger, payouts, and a reconciliation invariant that proves every penny is allocated.
+- `acsendr-conformance-suite` — A language-neutral behavioural contract with a thin runner, so a rewrite in another stack can be held to the same assertions instead of hand-translating them and letting them drift.
+- `acsendr-connector-economics` — A registry of third-party data connectors recording what each one actually costs to ship — verification regime, lead time, money, and blockers.
+- `acsendr-elicitation` — Elicit a person's decision-making identity — behavioural-event questionnaire, public-domain Big Five, and reconciliation against their own written record.
+- `acsendr-intake-contract` — One normalised document shape every ingest source produces, plus a deterministic quality gate that runs before anything is paid for.
+- `acsendr-mailbox-import` — Mailbox and transcript ingestion with sent-vs-received voice attribution — mbox, .eml, IMAP and VTT/SRT, no OAuth app and no vendor review.
+
+**Other Wicked Sick repos:**
+- `HubSpot Order Management` — Bi-directional sync between HubSpot and order systems — scoped, not yet built.
+- `pfSense P2P Link` — Point-to-point ISP link with routed /26 block (188.213.95.128/26 over 100.66.66.0/30 transit).
+- `Self-hosted UniFi Controller` — UniFi Network Controller running on Proxmox instead of cloud.
+- `wicked-amiga/amiga-projects` — —
+- `wicked-amiga/battle-isle-remake` — —
+- `wicked-amiga/deuteros-app` — Deuteros mobile port (Godot 4) — strategy & licensing stage
+- `wicked-amiga/deuteros-parallel` — Parallel Godot port of Deuteros (1991), companion to Deuteros Resurrected
+- `wicked-amiga/supremacy-remake` — Source-derived Supremacy reconstruction, extraction tools, and original-CPU validation evidence
+- _... +122 more — see /Github/PORTFOLIO_STATE.md_
+<!-- PORTFOLIO_STATE:END -->
+
 # CLAUDE.md
 
 This is a Traefik v3 provider plugin that replaces manually-maintained static TOML routing configs by auto-discovering sites from the Laravel Forge API. The owner manages several Laravel apps on a single Forge-managed server (`php01`) behind a Traefik reverse proxy, with Cloudflare DNS challenge for TLS.
@@ -76,6 +103,18 @@ log line instead of aborting.
 
 When adding a new Forge call, decide which of those two categories it is in.
 
+### The per-site store is a fallback, never a cache
+
+`siteLookupFor` keeps each site's last good domains and Reverb host, but every
+poll still calls `/domains` and `/integrations/reverb`. The stored copy is used
+only when Forge refuses the fetch. Serving it while Forge is answering keeps a
+removed or moved hostname routed to the old backend, and covered by its cert
+resolver, until the copy is replaced — that was a vulnerability, not an
+optimisation. `cacheTTL` only switches the fallback on (positive) or off (`0s`).
+Entries a completed poll did not route are pruned, so a re-enabled site cannot
+come back on records from before it was disabled. If the request volume is a
+problem, raise `pollInterval`; do not skip fetches.
+
 ### "Not there" and "not answered" are different
 
 `fetchRaw` must not collapse every non-200 into `(nil, nil)`. An empty result is a
@@ -136,6 +175,10 @@ FORGE_TOKEN=xxx FORGE_ORG=wickedsick go run ./cmd/verify \
   --cert-resolver cloudflare \
   --http-redirect
 ```
+
+The token is read only from `FORGE_TOKEN`. Do not add a flag for it: any local user
+can read a process's command line from `/proc/<pid>/cmdline`, but only the owner can
+read its environment.
 
 Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config.
 
