@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,7 @@ type verifyResult struct {
 	nobodyCmdline    string
 	nobodyCmdErr     string
 	nobodyEnvironErr string
+	procVisible      bool
 	stdout           string
 	stderr           string
 }
@@ -137,6 +139,14 @@ func TestVerifyEnvironmentTokenIsSentAndNotOnTheCommandLine(t *testing.T) {
 	if !strings.Contains(got.url, "https://forge.laravel.com/api/orgs/"+exampleOrg+"/servers") {
 		t.Fatalf("bearer was sent to %q, want the Forge servers endpoint", got.url)
 	}
+	// /proc is a Linux process table. macOS and Windows still have to prove the
+	// bearer came from the environment; they have no command line to inspect.
+	if runtime.GOOS == "linux" && !got.procVisible {
+		t.Fatal("linux command line was not readable")
+	}
+	if !got.procVisible {
+		return
+	}
 	if strings.Contains(got.cmdline, tokenPlaceholder) || strings.Contains(got.nobodyCmdline, tokenPlaceholder) {
 		t.Fatal("environment token appeared on the verify process command line")
 	}
@@ -175,7 +185,7 @@ func runAsVerify(t *testing.T, args []string, extraEnv []string) verifyResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], args...) //nolint:gosec // re-exec this test binary to call main with a real argv
-	cmd.Env = filteredEnv(append([]string{
+	cmd.Env = verifyChildEnv(append([]string{
 		"VERIFY_AS_MAIN=1",
 		"VERIFY_AUTH_FILE=" + authPath,
 		"VERIFY_RELEASE_FILE=" + releasePath,
@@ -214,15 +224,22 @@ func runAsVerify(t *testing.T, args []string, extraEnv []string) verifyResult {
 				continue
 			}
 			got.auth, got.url = splitRecord(string(body))
-			got.cmdline, got.cmdlineMode = readCmdline(t, cmd.Process.Pid)
-			nobodyCmd, nobodyErr := readProcAsNobody(cmd.Process.Pid, "cmdline")
-			got.nobodyCmdline = nobodyCmd
-			if nobodyErr != nil {
-				got.nobodyCmdErr = nobodyErr.Error()
+			cmdline, mode, visible, readErr := readCmdline(cmd.Process.Pid)
+			if readErr != nil {
+				release()
+				t.Fatalf("read cmdline: %v", readErr)
 			}
-			_, envErr := readProcAsNobody(cmd.Process.Pid, "environ")
-			if envErr != nil {
-				got.nobodyEnvironErr = envErr.Error()
+			got.cmdline, got.cmdlineMode, got.procVisible = cmdline, mode, visible
+			if visible {
+				nobodyCmd, nobodyErr := readProcAsNobody(cmd.Process.Pid, "cmdline")
+				got.nobodyCmdline = nobodyCmd
+				if nobodyErr != nil {
+					got.nobodyCmdErr = nobodyErr.Error()
+				}
+				_, envErr := readProcAsNobody(cmd.Process.Pid, "environ")
+				if envErr != nil {
+					got.nobodyEnvironErr = envErr.Error()
+				}
 			}
 			release()
 			select {
@@ -266,18 +283,26 @@ func exitCode(t *testing.T, err error) int {
 	return -1
 }
 
-func readCmdline(t *testing.T, pid int) (string, os.FileMode) {
-	t.Helper()
+// readCmdline reads the child command line from the Linux process table.
+// Other operating systems have no /proc, so the caller skips those checks
+// and still asserts on the Forge bearer.
+func readCmdline(pid int) (string, os.FileMode, bool, error) {
+	if runtime.GOOS != "linux" {
+		return "", 0, false, nil
+	}
 	path := fmt.Sprintf("/proc/%d/cmdline", pid)
 	body, err := os.ReadFile(path) //nolint:gosec // path is /proc/<pid>/cmdline for the child this test started
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		if os.IsNotExist(err) {
+			return "", 0, false, nil
+		}
+		return "", 0, false, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("stat %s: %v", path, err)
+		return "", 0, false, err
 	}
-	return string(body), info.Mode().Perm()
+	return string(body), info.Mode().Perm(), true, nil
 }
 
 func readProcAsNobody(pid int, name string) (string, error) {
@@ -288,7 +313,7 @@ func readProcAsNobody(pid int, name string) (string, error) {
 	return string(out), err
 }
 
-func filteredEnv(extra []string) []string {
+func verifyChildEnv(extra []string) []string {
 	skip := map[string]bool{
 		"FORGE_TOKEN": true,
 		"FORGE_ORG":   true,
