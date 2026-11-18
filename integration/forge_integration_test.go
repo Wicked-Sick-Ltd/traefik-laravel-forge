@@ -677,24 +677,31 @@ func TestGenerateConfiguration_ReverbFetchFailureDegradesGracefully(t *testing.T
 }
 
 // An accepted traefik:port sends main routers to the app. Without a Reverb
-// answer there is no way to keep the WebSocket hostname on Nginx, so the poll
-// must not publish that config.
-func TestGenerateConfiguration_PortOverrideAbortsWhenReverbDoesNotAnswer(t *testing.T) {
+// answer there is no way to keep the WebSocket hostname off that port, so this
+// site stays on the upstream for the poll. Another site on the same server
+// still gets its override.
+func TestGenerateConfiguration_UnansweredReverbKeepsUpstreamPort(t *testing.T) {
 	m := mocks.NewMockForgeClient(t)
 	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
-	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com", "traefik:port=3000")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{
+		makeSite("site1", "example.com", "traefik:port=3000"),
+		makeSite("site2", "other.example.com", "traefik:port=3000"),
+	}, nil)
 	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
 		makeDomain("example.com", "primary"),
 		makeDomain("ws.example.com", "alias"),
 	}, nil)
+	m.EXPECT().FetchDomains("s1", "site2").Return([]forge.ForgeDomain{makeDomain("other.example.com", "primary")}, nil)
 	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(nil, assert.AnError)
+	noReverb(m, "s1", "site2")
 
 	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
 	cfg, err := p.GenerateConfiguration()
 
-	require.Error(t, err)
-	assert.Nil(t, cfg)
-	assert.NotContains(t, err.Error(), "ws.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-example.com"))
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
+	assert.Equal(t, "http://10.0.0.1:3000", serviceURLFor(t, cfg, "forge-site2-other.example.com"))
 }
 
 // A rejected port tag leaves the site on the upstream port, so a missed Reverb

@@ -56,11 +56,11 @@ func cacheKey(serverID, siteID string) string { return serverID + "/" + siteID }
 //   - domains fetch fails with nothing held: return the error so the caller
 //     aborts the poll rather than emitting a config missing this site.
 //   - Reverb fetch fails: reverbResolved stays false unless a previous answer
-//     is held. A caller that sends the site to a port other than the server
-//     upstream must abort the poll, because an unidentified WebSocket hostname
-//     would otherwise follow the site's traefik:port. With no port override, or
-//     with a previous answer, the last host stands in and the domain stays on
-//     the same Nginx backend as the other routers.
+//     is held. A caller that would send the site to a different port keeps it
+//     on the server upstream for this poll, so an unidentified WebSocket
+//     hostname is not sent to the app and the rest of the poll still finishes.
+//     With no port override, or with a previous answer, the last host stands
+//     in and the domain stays on the same Nginx backend as the other routers.
 func (p *Provider) siteLookupFor(serverID string, site ForgeSite) (siteLookup, error) {
 	key := cacheKey(serverID, site.ID)
 	fallback := p.cacheTTL > 0

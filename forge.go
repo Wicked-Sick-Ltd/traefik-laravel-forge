@@ -575,10 +575,12 @@ func (p *Provider) processSite(
 	domains, reverbHost := lookup.domains, lookup.reverbHost
 	// An accepted traefik:port sends main routers to the app and Reverb routers
 	// to Nginx. If Forge did not say which hostname is Reverb, and no previous
-	// answer is held, that hostname would follow the app port. Abort instead.
+	// answer is held, that hostname would follow the app port. Keep this site
+	// on the upstream port for this poll instead of abandoning every other site.
 	if tags.Port != upstreamPort && !lookup.reverbResolved {
-		return fmt.Errorf("reverb integration for site %q did not answer, and traefik:port selects %d instead of upstream port %d",
-			site.Attributes.Name, tags.Port, upstreamPort)
+		pluginLog.Printf("Reverb integration for site %q did not answer; keeping upstream port %d for this poll instead of traefik:port=%d",
+			site.Attributes.Name, upstreamPort, tags.Port)
+		tags.Port = upstreamPort
 	}
 
 	mainDomains, reverbDomains := classifyDomains(domains, reverbHost)
