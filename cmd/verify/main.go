@@ -4,7 +4,11 @@
 // Usage:
 //
 //	FORGE_TOKEN=xxx FORGE_ORG=my-org go run ./cmd/verify
-//	go run ./cmd/verify -token xxx -org my-org -compare path/to/dynamic.yml
+//	FORGE_TOKEN=xxx go run ./cmd/verify -org my-org -compare path/to/dynamic.yml
+//
+// The Forge API token is read only from the FORGE_TOKEN environment variable.
+// There is deliberately no flag for it: a process command line is readable by
+// every local user, while its environment is readable only by its owner.
 package main
 
 import (
@@ -20,8 +24,19 @@ import (
 	forge "github.com/Wicked-Sick-Ltd/traefik-laravel-forge"
 )
 
+// unexpectedArgsMessage reports leftover positional arguments.
+// Go's flag package leaves the word after a boolean flag as an argument
+// (only -flag=false is accepted), and a token pasted on the command line
+// lands here too. The text names both causes and does not include the values.
+func unexpectedArgsMessage(narg int) string {
+	if narg == 0 {
+		return ""
+	}
+
+	return "error: unexpected positional arguments (boolean flags need -flag=false; the token belongs in FORGE_TOKEN)"
+}
+
 func main() {
-	token := flag.String("token", os.Getenv("FORGE_TOKEN"), "Forge API token (or set FORGE_TOKEN)")
 	org := flag.String("org", os.Getenv("FORGE_ORG"), "Forge organization slug (or set FORGE_ORG)")
 	certResolver := flag.String("cert-resolver", "", "Default cert resolver name (e.g. letsencrypt)")
 	sitesEnabled := flag.Bool("default-sites-enabled", true, "Whether sites are enabled by default")
@@ -31,10 +46,24 @@ func main() {
 	comparePath := flag.String("compare", "", "Path to existing Traefik dynamic config file (.yml) to compare against")
 	jsonOut := flag.Bool("json", false, "Output generated config as JSON")
 	dumpRaw := flag.Bool("dump", false, "Dump raw Forge API responses as JSON (useful for inspecting available fields)")
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		_, _ = fmt.Fprintf(out, "Usage: FORGE_TOKEN=... %s [flags]\n\n", os.Args[0])
+		_, _ = fmt.Fprintln(out, "The Forge API token is read only from the FORGE_TOKEN environment variable.")
+		_, _ = fmt.Fprintln(out, "Boolean flags take -flag or -flag=false. A separate word is a positional argument.")
+		_, _ = fmt.Fprintln(out)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
-	if *token == "" {
-		fmt.Fprintln(os.Stderr, "error: -token flag or FORGE_TOKEN env var is required")
+	if msg := unexpectedArgsMessage(flag.NArg()); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(2)
+	}
+
+	token := os.Getenv("FORGE_TOKEN")
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "error: FORGE_TOKEN env var is required")
 		os.Exit(1)
 	}
 	if *org == "" {
@@ -43,7 +72,7 @@ func main() {
 	}
 
 	cfg := forge.CreateConfig()
-	cfg.APIToken = *token
+	cfg.APIToken = token
 	cfg.Organization = *org
 	cfg.DefaultCertResolver = *certResolver
 	cfg.DefaultSitesEnabled = *sitesEnabled
