@@ -54,9 +54,11 @@ providers:
       # Set a cert resolver to enable TLS for all sites automatically.
       defaultCertResolver: "cloudflare"
 
-      # Generate HTTP→HTTPS redirect routers.
+      # Generate HTTP→HTTPS redirect routers on the "web" entry point.
       # When true and redirectMiddleware is empty, the plugin creates
       # a forge-https-redirect middleware automatically.
+      # Sites whose traefik:entrypoints tag names neither "web" nor "websecure"
+      # get no redirect router. A tag of only "websecure" still redirects.
       httpRedirect: true
 
       # Optional: reference an externally-defined redirect middleware instead.

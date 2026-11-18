@@ -1,6 +1,6 @@
 # Tag Configuration
 
-Forge tags let you control routing behaviour per-site and per-server without editing config files. Changes apply on the next poll (default: 30 seconds).
+Forge tags let you control routing behaviour per-site and per-server without editing config files. Changes apply on the next poll (default: 30 seconds). The same holds for domain records and the Reverb integration, which are read fresh from Forge on every poll.
 
 ## Format
 
@@ -91,6 +91,13 @@ traefik:http-redirect=true    # generate HTTP→HTTPS redirect router
 traefik:http-redirect=false   # no redirect router even if httpRedirect is globally true
 ```
 
+The redirect router listens on the `web` entry point and always carries a redirect
+middleware — `redirectMiddleware` if configured, otherwise the plugin's own
+`forge-https-redirect` (created even when `httpRedirect` is globally false). It is
+generated for TLS sites whose `traefik:entrypoints` tag is unset, or includes
+`web` or `websecure`. A tag that names only other entry points gets no redirect
+router.
+
 ---
 
 ### `traefik:entrypoints`
@@ -103,6 +110,15 @@ traefik:entrypoints=web,websecure
 ```
 
 When not set, defaults to `websecure` if TLS is enabled, `web` otherwise.
+
+`websecure` is the public TLS entry point. A tag that lists it, including one
+that lists only `websecure`, still gets an HTTP→HTTPS redirect router on `web`.
+The redirect router is omitted only when the tag is set and names neither `web`
+nor `websecure`. Use that to keep a site on an internal entry point only:
+
+```
+traefik:entrypoints=internal
+```
 
 ---
 
@@ -168,6 +184,12 @@ Override the IP address used to reach this server. By default the plugin uses `p
 traefik:upstream-host=10.0.1.10
 ```
 
+The value must be a hostname, an IPv4 address, or a bracketed IPv6 address
+(`[2001:db8::1]`). A hostname is letters, digits, `.`, `-` and `_` only.
+Anything else (whitespace, a port, a path, a bare IPv6 address, a zone ID) is
+ignored with a log line, and the server falls back to the `serverMappings` host
+or the auto-detected IP. Set the port with `traefik:upstream-port`.
+
 Aliases: `traefik:lb-host`, `traefik:loadbalancer-host`
 
 ---
@@ -180,8 +202,16 @@ Override the default backend port (80) for all sites on this server. Can be over
 traefik:upstream-port=8080
 ```
 
+The tag does not need `traefik:upstream-host`. It applies to whichever host is
+chosen — the `traefik:upstream-host` tag, a `serverMappings` host, or the
+auto-detected Forge IP — and it outranks a mapping's `upstreamPort`, including
+when the tag sets port 80 explicitly. The full port order is: site `traefik:port`,
+then this tag, then the mapping's `upstreamPort`, then 80. A server with a
+`traefik:upstream-host` tag ignores its mapping entirely, port included.
+
 Validated the same way as `traefik:port` — must be 1–65535, and an invalid value
-falls back to port 80 with a log line rather than being applied.
+is ignored with a log line rather than being applied, so the port falls back to
+the mapping's `upstreamPort` or 80.
 
 Aliases: `traefik:lb-port`, `traefik:loadbalancer-port`
 
