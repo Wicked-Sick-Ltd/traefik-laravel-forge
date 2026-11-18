@@ -661,8 +661,8 @@ func TestGenerateConfiguration_OneServerFailureDoesNotSilentlyDropAnother(t *tes
 	require.Error(t, err)
 }
 
-// A Reverb failure only costs us the ability to single out the Reverb domain, so
-// it degrades rather than aborting — the site keeps its routers.
+// A Reverb failure only costs us the ability to single out the Reverb domain when
+// every router still shares the Nginx port, so it degrades rather than aborting.
 func TestGenerateConfiguration_ReverbFetchFailureDegradesGracefully(t *testing.T) {
 	m := mocks.NewMockForgeClient(t)
 	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
@@ -674,6 +674,74 @@ func TestGenerateConfiguration_ReverbFetchFailureDegradesGracefully(t *testing.T
 
 	require.NoError(t, err)
 	assert.NotNil(t, cfg.HTTP.Routers["forge-site1-example.com"])
+}
+
+// An accepted traefik:port sends main routers to the app. Without a Reverb
+// answer there is no way to keep the WebSocket hostname on Nginx, so the poll
+// must not publish that config.
+func TestGenerateConfiguration_PortOverrideAbortsWhenReverbDoesNotAnswer(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com", "traefik:port=3000")}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
+		makeDomain("example.com", "primary"),
+		makeDomain("ws.example.com", "alias"),
+	}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(nil, assert.AnError)
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	cfg, err := p.GenerateConfiguration()
+
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.NotContains(t, err.Error(), "ws.example.com")
+}
+
+// A rejected port tag leaves the site on the upstream port, so a missed Reverb
+// answer still shares that backend and the poll continues.
+func TestGenerateConfiguration_DisallowedPortDoesNotAbortOnReverbFailure(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com", "traefik:port=6379")}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{makeDomain("example.com", "primary")}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(nil, assert.AnError)
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	cfg, err := p.GenerateConfiguration()
+
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-example.com"))
+}
+
+// A previous Reverb answer is enough to keep the WebSocket hostname on Nginx
+// when the next lookup is refused.
+func TestGenerateConfiguration_CachedReverbHostSurvivesLaterFailure(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil).Times(2)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com", "traefik:port=3000")}, nil).Times(2)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
+		makeDomain("example.com", "primary"),
+		makeDomain("ws.example.com", "alias"),
+	}, nil).Times(2)
+	calls := 0
+	m.EXPECT().FetchReverbIntegration("s1", "site1").RunAndReturn(
+		func(string, string) (*forge.ForgeReverbIntegration, error) {
+			calls++
+			if calls == 1 {
+				return &forge.ForgeReverbIntegration{Enabled: true, Host: "ws.example.com", Port: 8081}, nil
+			}
+			return nil, assert.AnError
+		},
+	).Times(2)
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	if _, err := p.GenerateConfiguration(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := p.GenerateConfiguration()
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.1:3000", serviceURLFor(t, cfg, "forge-site1-example.com"))
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
 }
 
 // -- serverMappings --

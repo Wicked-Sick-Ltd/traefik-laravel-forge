@@ -78,7 +78,9 @@ Must also be a whole number in the range 1–65535. Values that are out of range
 carry trailing characters (`-1`, `999999`, `80x`) are rejected the same way.
 
 Does not affect the Reverb router — Reverb traffic routes through Nginx on the
-server's upstream port (80 by default), even when this tag is accepted.
+server's upstream port (80 by default), even when this tag is accepted. If Forge
+does not answer the Reverb lookup and this site has no previous Reverb answer,
+the poll is abandoned rather than sending that hostname to the overridden port.
 
 ---
 
@@ -266,7 +268,7 @@ Traefik must route both the apex and `www.` variant to the backend regardless of
 
 ### Reverb WebSocket
 
-If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain. The router points to **Nginx on the server's upstream port (80 by default)** — the same backend as the main site unless the site has an accepted `traefik:port` override, in which case the Reverb router gets its own service pointing at Nginx. Nginx handles the WebSocket proxy to the Reverb process internally using the location block Forge creates.
+If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain. The router points to **Nginx on the server's upstream port (80 by default)** — the same backend as the main site unless the site has an accepted `traefik:port` override, in which case the Reverb router gets its own service pointing at Nginx. If that lookup does not answer and the site has no previous Reverb answer, the poll is abandoned. Nginx handles the WebSocket proxy to the Reverb process internally using the location block Forge creates.
 
 The Reverb router has no HTTP→HTTPS redirect (WebSocket clients don't follow redirects). All other settings (TLS, middlewares, entry points) match the main site.
 

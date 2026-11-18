@@ -249,7 +249,7 @@ This applies in both redirect directions — Traefik must route `www.example.com
 If a site has Reverb configured in Forge, the plugin automatically:
 
 1. Fetches the Reverb host from `/integrations/reverb`
-2. Creates a **separate router** for the Reverb domain, pointing to Nginx on the server's upstream port (80 by default), even when the site has a `traefik:port` override
+2. Creates a **separate router** for the Reverb domain, pointing to Nginx on the server's upstream port (80 by default), even when the site has a `traefik:port` override. If that lookup does not answer and the site has no previous Reverb answer, the poll stops instead of sending the hostname to the overridden port
 3. Applies the same TLS settings as the main router
 4. **No HTTP→HTTPS redirect** for the Reverb router — WebSocket clients don't follow redirects
 

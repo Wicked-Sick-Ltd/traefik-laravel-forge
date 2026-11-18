@@ -97,9 +97,12 @@ fail the whole poll rather than skipping a server or a site. `sendConfiguration`
 sends nothing and Traefik keeps its last good configuration until a poll succeeds
 end to end.
 
-`FetchReverbIntegration` is the exception: losing it only means the Reverb domain is
-not singled out, and it still routes to the same Nginx backend, so it degrades with a
-log line instead of aborting.
+`FetchReverbIntegration` degrades with a log line when the site has no accepted
+`traefik:port` override, or when a previous Reverb answer is held: the domain is
+not singled out, and it still routes to the same Nginx backend. It fails the poll
+when an accepted `traefik:port` differs from the server upstream port and no
+previous answer is held. Otherwise the unidentified WebSocket hostname would be
+sent to the app port.
 
 When adding a new Forge call, decide which of those two categories it is in.
 
