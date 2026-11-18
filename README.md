@@ -189,7 +189,7 @@ Add these to any site in Forge to control how it's routed:
 | `traefik:entrypoints` | `traefik:entrypoints=websecure,web` | Override entry points (comma-separated). A list that includes `web` or `websecure` still gets an HTTP redirect router. A list that names only other entry points does not, so those hostnames stay off port 80 |
 | `traefik:aliases` | `traefik:aliases=app.example.com,www.example.com` | Add extra hostnames to the router rule (comma-separated) |
 | `traefik:middlewares` | `traefik:middlewares=my-auth,rate-limit` | Attach named Traefik middlewares to this site's router (comma-separated). Middlewares must be defined in static config. Applied to the main and Reverb routers; not the HTTP redirect router |
-| `traefik:forge-domain` | `traefik:forge-domain=true` | Opt `.on-forge.com` domains into routing. Without this, `.on-forge.com`-only sites are skipped entirely; mixed-domain sites have the `.on-forge.com` entry dropped. When opted in, TLS is disabled for `.on-forge.com` domains |
+| `traefik:forge-domain` | `traefik:forge-domain=true` | Opt `.on-forge.com` domains into routing. Without this, `.on-forge.com` entries are dropped and do not count as a main domain. The site-name fallback still runs only when the site has no main domain records at all. A Reverb router is still created. When opted in, TLS is disabled for `.on-forge.com` domains |
 
 ### Server tags
 
@@ -223,7 +223,7 @@ The plugin fetches all domain records for each site. Domain types:
 - `alias` — additional domains, included in the Host() rule
 - `reverb` — Laravel Reverb WebSocket domain, gets its own router (see below)
 
-**`.on-forge.com` domains are excluded by default.** Forge assigns every site an `.on-forge.com` subdomain, but Forge controls DNS and TLS for these — the plugin can't obtain certs for them and their DNS may not point to your load balancer. Sites where `.on-forge.com` is the only domain are skipped entirely. Use `traefik:forge-domain=true` to opt in (routes HTTP only, no TLS).
+**`.on-forge.com` domains are excluded by default.** Forge assigns every site an `.on-forge.com` subdomain, but Forge controls DNS and TLS for these — the plugin can't obtain certs for them and their DNS may not point to your load balancer. They are dropped and do not by themselves cause a fallback to the Forge site name. A site whose only main records are `.on-forge.com` publishes no main router; its Reverb router is still created. The site-name fallback runs only when the site has no main domain records at all. Use `traefik:forge-domain=true` to opt in (routes HTTP only, no TLS).
 
 If a primary domain has **wildcard subdomains enabled** in Forge, a `HostRegexp` clause is automatically appended:
 
@@ -251,6 +251,8 @@ If a site has Reverb configured in Forge, the plugin automatically:
 2. Creates a **separate router** for the Reverb domain, pointing to Nginx on port 80
 3. Applies the same TLS settings as the main router
 4. **No HTTP→HTTPS redirect** for the Reverb router — WebSocket clients don't follow redirects
+
+The Reverb router is created even when the site has no main router (for example, when its only other domain is `.on-forge.com`). An enabled domain record or Reverb record beats a `traefik:aliases` entry for the same hostname, so the alias cannot remove that site's router or its HTTP redirect. If two sites both hold a record, the lowest numeric site id that publishes TLS keeps the host on the entry points it already has, and the other site loses it. That keeps cleartext and HTTPS on one upstream, and keeps the HTTP redirect with the TLS site. With no TLS record, the lowest numeric site id keeps the host. Comparison is numeric, so site 2 beats site 10. A site's own second router is not a conflict. Alias-only overlaps, where no record is involved, are settled per entry point, and sharing only `web` does not remove the name from `websecure`. Letter case and one trailing dot do not make a second host.
 
 Nginx handles the WebSocket proxy to the Reverb process internally, using the location block Forge creates when you enable Reverb. Traefik only needs to route the Reverb domain to Nginx.
 
