@@ -180,7 +180,7 @@ The token is read only from `FORGE_TOKEN`. Do not add a flag for it: any local u
 can read a process's command line from `/proc/<pid>/cmdline`, but only the owner can
 read its environment.
 
-Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config.
+Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config. `--compare` only treats a generated rule as host coverage when it parses as `||`-joined ``Host(`name`)`` / wildcard `HostRegexp` clauses (`parseHostRule`); any other rule is REJECTED, its hosts are withheld from coverage, and the tool exits 1.
 
 Dump output files (`dump*.json`, `verify.out`) are gitignored.
 

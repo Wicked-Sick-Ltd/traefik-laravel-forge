@@ -307,6 +307,8 @@ Flags mirror the plugin config: `--cert-resolver`, `--default-sites-enabled`, `-
 
 The Forge API token is read only from the `FORGE_TOKEN` environment variable; there is no flag for it. Any local user can read a running process's command line, but only its owner can read its environment, so never put the token in the arguments.
 
+`--compare` only counts a generated rule as covering its hostnames when the rule is nothing but `Host(...)` / wildcard `HostRegexp(...)` clauses joined by `||`. A rule with any other matcher (for example a domain name or `traefik:aliases` value that injects `PathPrefix`) is listed under **REJECTED** with the offending clause, its hostnames are not counted as covered, and the command exits non-zero.
+
 ## Troubleshooting
 
 **No routes created**

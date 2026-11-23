@@ -84,10 +84,13 @@ FORGE_TOKEN=xxx FORGE_ORG=my-org go run ./cmd/verify \
   --compare /etc/traefik/conf.d/myapp.com.toml
 ```
 
-The output shows three sections:
+The output shows these sections:
+- **REJECTED** — generated routers whose rule matches on more than hostnames (any clause other than `Host(...)` or the plugin's wildcard `HostRegexp(...)`, joined by `||`). The offending clause is printed, the router's hostnames are not counted as covered, and the command exits non-zero. Do not delete static routes until this section is gone — fix the Forge domain name or `traefik:aliases` tag that produced the rule.
 - **MISSING** — hosts in your static file not covered by the plugin (check if the site exists in Forge)
 - **NEW** — Forge sites not yet in your static config (new routes that will appear)
 - **MATCHED** — hosts covered by both
+
+The "OK: All hosts … are covered" line is only printed when nothing is MISSING and nothing is REJECTED.
 
 ### 4. Handle domain aliases
 
