@@ -103,6 +103,18 @@ log line instead of aborting.
 
 When adding a new Forge call, decide which of those two categories it is in.
 
+### The per-site store is a fallback, never a cache
+
+`siteLookupFor` keeps each site's last good domains and Reverb host, but every
+poll still calls `/domains` and `/integrations/reverb`. The stored copy is used
+only when Forge refuses the fetch. Serving it while Forge is answering keeps a
+removed or moved hostname routed to the old backend, and covered by its cert
+resolver, until the copy is replaced — that was a vulnerability, not an
+optimisation. `cacheTTL` only switches the fallback on (positive) or off (`0s`).
+Entries a completed poll did not route are pruned, so a re-enabled site cannot
+come back on records from before it was disabled. If the request volume is a
+problem, raise `pollInterval`; do not skip fetches.
+
 ### "Not there" and "not answered" are different
 
 `fetchRaw` must not collapse every non-200 into `(nil, nil)`. An empty result is a
@@ -163,6 +175,10 @@ FORGE_TOKEN=xxx FORGE_ORG=wickedsick go run ./cmd/verify \
   --cert-resolver cloudflare \
   --http-redirect
 ```
+
+The token is read only from `FORGE_TOKEN`. Do not add a flag for it: any local user
+can read a process's command line from `/proc/<pid>/cmdline`, but only the owner can
+read its environment.
 
 Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config. `--compare` only treats a generated rule as host coverage when it parses as `||`-joined ``Host(`name`)`` / wildcard `HostRegexp` clauses (`parseHostRule`); any other rule is REJECTED, its hosts are withheld from coverage, and the tool exits 1.
 

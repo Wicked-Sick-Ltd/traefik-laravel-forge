@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	forge "github.com/Wicked-Sick-Ltd/traefik-laravel-forge"
 	"github.com/traefik/genconf/dynamic"
@@ -253,4 +257,129 @@ func TestExtractHostsFromConfig(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("extractHostsFromConfig() = %v, want %v", got, want)
 	}
+}
+
+func TestUnexpectedArgsMessage(t *testing.T) {
+	secret := "forge-token-not-on-argv-9f3c"
+	if got := unexpectedArgsMessage(0); got != "" {
+		t.Fatalf("narg 0 = %q, want empty", got)
+	}
+
+	got := unexpectedArgsMessage(1)
+	if got != unexpectedArgsMessage(2) {
+		t.Fatalf("message depends on the argument count: %q vs %q", got, unexpectedArgsMessage(2))
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("message included a value: %q", got)
+	}
+	for _, part := range []string{"FORGE_TOKEN", "-flag=false", "positional arguments"} {
+		if !strings.Contains(got, part) {
+			t.Fatalf("message %q missing %q", got, part)
+		}
+	}
+}
+
+// TestMainPositionalArgsExitBeforeForge runs the real main path in a child
+// process. A leftover word must exit 2 before the Forge token is used, and
+// the equals form of a boolean flag must not be treated as that leftover word.
+func TestMainPositionalArgsExitBeforeForge(t *testing.T) {
+	const childEnv = "VERIFY_CHILD_ARGS"
+	if raw := os.Getenv(childEnv); raw != "" {
+		os.Args = strings.Split(raw, "\x1e")
+		main()
+		os.Exit(0)
+	}
+
+	secret := "forge-token-not-on-argv-9f3c"
+	tests := []struct {
+		name      string
+		args      []string
+		withToken bool
+		exitCode  int
+		want      string
+		absent    []string
+	}{
+		{
+			name:      "bare token",
+			args:      []string{"verify", secret},
+			withToken: true,
+			exitCode:  2,
+			want:      "boolean flags need -flag=false",
+			absent:    []string{secret},
+		},
+		{
+			name:      "bool flag with a separate word",
+			args:      []string{"verify", "--default-sites-enabled", "false"},
+			withToken: true,
+			exitCode:  2,
+			want:      "the token belongs in FORGE_TOKEN",
+			absent:    []string{secret},
+		},
+		{
+			name:      "http-redirect with a separate true",
+			args:      []string{"verify", "--http-redirect", "true"},
+			withToken: true,
+			exitCode:  2,
+			want:      "-flag=false",
+			absent:    []string{"true", secret},
+		},
+		{
+			name:     "equals form reaches the missing-token check",
+			args:     []string{"verify", "--default-sites-enabled=false"},
+			exitCode: 1,
+			want:     "error: FORGE_TOKEN env var is required",
+			absent:   []string{"positional arguments"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			// G204: the command is this test binary, re-executed with a fixed -test.run.
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMainPositionalArgsExitBeforeForge$") //nolint:gosec
+			env := filteredEnv("FORGE_TOKEN", "FORGE_ORG", childEnv)
+			env = append(env, childEnv+"="+strings.Join(tt.args, "\x1e"), "FORGE_ORG=example")
+			if tt.withToken {
+				env = append(env, "FORGE_TOKEN="+secret)
+			}
+			cmd.Env = env
+
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("exit err = %v; output:\n%s", err, out)
+			}
+			if exitErr.ExitCode() != tt.exitCode {
+				t.Fatalf("exit = %d, want %d; output:\n%s", exitErr.ExitCode(), tt.exitCode, out)
+			}
+			msg := string(out)
+			if !strings.Contains(msg, tt.want) {
+				t.Fatalf("output missing %q:\n%s", tt.want, msg)
+			}
+			for _, bad := range tt.absent {
+				if strings.Contains(msg, bad) {
+					t.Fatalf("output contains %q:\n%s", bad, msg)
+				}
+			}
+		})
+	}
+}
+
+func filteredEnv(drop ...string) []string {
+	skip := make(map[string]bool, len(drop))
+	for _, key := range drop {
+		skip[key] = true
+	}
+
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if skip[name] {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
 }
