@@ -72,18 +72,18 @@ func TestCompareRejectsRulesWithNonHostMatchers(t *testing.T) {
 		clause string
 	}{
 		{
-			name: "alias tag appends PathPrefix",
+			// traefik:aliases values are now dropped unless they are plain
+			// hostnames (#20), so the injection is carried by the domain name.
+			name: "domain name appends PathPrefix",
 			client: fakeForge{
-				siteTags: []string{"traefik:aliases=app.example.com`) || PathPrefix(`/"},
-				domains:  []forge.ForgeDomain{domain("app.example.com", false, "")},
+				domains: []forge.ForgeDomain{domain("app.example.com`) || PathPrefix(`/", false, "")},
 			},
 			clause: "PathPrefix(`/`)",
 		},
 		{
-			name: "alias tag appends a catch-all HostRegexp",
+			name: "domain name appends a catch-all HostRegexp",
 			client: fakeForge{
-				siteTags: []string{"traefik:aliases=app.example.com`) || HostRegexp(`.*"},
-				domains:  []forge.ForgeDomain{domain("app.example.com", false, "")},
+				domains: []forge.ForgeDomain{domain("app.example.com`) || HostRegexp(`.*", false, "")},
 			},
 			clause: "HostRegexp(`.*`)",
 		},

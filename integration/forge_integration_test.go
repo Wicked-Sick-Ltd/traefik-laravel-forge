@@ -751,6 +751,31 @@ func TestGenerateConfiguration_CachedReverbHostSurvivesLaterFailure(t *testing.T
 	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
 }
 
+// With an accepted traefik:port and only a .on-forge.com main domain, no main
+// router is built, but the Reverb router must still be kept (#20) and must still
+// go to Nginx on the upstream port rather than the app port (#25).
+func TestGenerateConfiguration_ReverbOnlySiteWithPortOverrideUsesNginx(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "myapp.on-forge.com", "traefik:port=3000")}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
+		makeDomain("myapp.on-forge.com", "primary"),
+		makeDomain("ws.example.com", "alias"),
+	}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(&forge.ForgeReverbIntegration{
+		Enabled: true, Host: "ws.example.com", Port: 8081,
+	}, nil)
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	cfg, err := p.GenerateConfiguration()
+	require.NoError(t, err)
+
+	assert.Nil(t, cfg.HTTP.Routers["forge-site1-myapp.on-forge.com"])
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
+	assert.Nil(t, cfg.HTTP.Services["forge-myapp.on-forge.com-site1-service"],
+		"no main router, so no app-port service")
+}
+
 // -- serverMappings --
 
 // A mapping that overrides only the port must keep the auto-detected Forge IP.

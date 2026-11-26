@@ -168,7 +168,7 @@ traefik:forge-domain=true
 ```
 
 **Site with only `.on-forge.com` domains (no custom domain set yet):**
-Without this tag, the site is skipped entirely. With it, the site is routed on HTTP only — TLS is disabled since we can't obtain certs for domains we don't control.
+Without this tag, the `.on-forge.com` records are dropped and no main router is created. The plugin does not fall back to the Forge site name in that case, because that name may be a hostname the site no longer holds. A Reverb router is still created for the site's Reverb host. With the tag, the site is routed on HTTP only — TLS is disabled since we can't obtain certs for domains we don't control.
 
 **Site with real custom domains alongside `.on-forge.com`:**
 Without this tag, the `.on-forge.com` domain is silently dropped from the Host() rule and the real domains are routed normally. With the tag, the `.on-forge.com` domain is included in the rule alongside the real ones.
@@ -243,7 +243,7 @@ Forge assigns every site an `.on-forge.com` subdomain (e.g. `myapp-abc123.on-for
 - Forge controls DNS and TLS for them — we can't obtain certs for them
 - Their DNS may not point to your load balancer
 
-Sites where `.on-forge.com` is the only domain are **skipped entirely** unless `traefik:forge-domain=true` is set. Sites with real custom domains simply have the `.on-forge.com` entry dropped from their Host() rule. Use `traefik:forge-domain=true` to opt in if needed (see the site tags section below).
+Unless `traefik:forge-domain=true` is set, `.on-forge.com` records are dropped and do not count as a main domain. A site whose only main records are `.on-forge.com` gets no main router; the site-name fallback runs only when there are no main domain records at all. Its Reverb router (below) is still created. Sites with real custom domains simply have the `.on-forge.com` entry dropped from their Host() rule. Use `traefik:forge-domain=true` to opt in if needed (see the site tags section below).
 
 ---
 
@@ -272,6 +272,8 @@ Traefik must route both the apex and `www.` variant to the backend regardless of
 If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain. The router points to **Nginx on the server's upstream port (80 by default)** — the same backend as the main site unless the site has an accepted `traefik:port` override, in which case the Reverb router gets its own service pointing at Nginx. If that lookup does not answer and the site has no previous Reverb answer, the site stays on the upstream port for that poll. Other sites are still published. Nginx handles the WebSocket proxy to the Reverb process internally using the location block Forge creates.
 
 The Reverb router has no HTTP→HTTPS redirect (WebSocket clients don't follow redirects). All other settings (TLS, middlewares, entry points) match the main site.
+
+The Reverb router is created whenever the Reverb host has an enabled domain record, even if the site has no main router (for example, its only other domain is `.on-forge.com`). Leaving it out would make Traefik delete the router. An enabled domain record or Reverb record beats a `traefik:aliases` entry, so the alias cannot remove that site's router or its HTTP redirect. Only a record's own hostname counts as a record claim: the site-name fallback for a site with no domain records, and the `www.` host added by a www redirect, are weighed like an alias, so a real record for that name always beats them. If two sites both hold a record, the lowest numeric site id that publishes TLS keeps the host, and the other site loses it, so the two entry points are not sent to different upstreams. The plugin logs which site kept it. With no TLS record, the lowest numeric site id keeps the host. Comparison is numeric, so site 2 beats site 10. A site listing the name twice is not a conflict. Alias-only overlaps are settled per entry point, and sharing only `web` does not remove the name from `websecure`. An alias that is not a hostname (rule syntax, spaces) is ignored. A single-label name is still a hostname.
 
 ---
 
