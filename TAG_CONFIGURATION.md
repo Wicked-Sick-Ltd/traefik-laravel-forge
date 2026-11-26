@@ -62,11 +62,26 @@ traefik:port=8080
 traefik:port=3000
 ```
 
-Must be a whole number in the range 1–65535. Values that are out of range or that
-carry trailing characters (`-1`, `999999`, `80x`) are rejected, the default port is
-used instead, and the offending value is named in the Traefik log.
+**The port must be listed in the plugin's `allowedSitePorts` option.** Anyone who can
+tag a site in Forge could otherwise point its public hostnames at any port on the
+server, so the operator decides which ports a site tag may select:
 
-Does not affect the Reverb router — Reverb traffic routes through Nginx on port 80.
+```yaml
+allowedSitePorts: [3000, 8080]
+```
+
+With `allowedSitePorts` unset (the default), `traefik:port` has no effect unless it
+names the server's own upstream port. A port that is not on the list is ignored, the
+site keeps the server's upstream port, and the Traefik log names the rejected value.
+
+Must also be a whole number in the range 1–65535. Values that are out of range or that
+carry trailing characters (`-1`, `999999`, `80x`) are rejected the same way.
+
+Does not affect the Reverb router — Reverb traffic routes through Nginx on the
+server's upstream port (80 by default), even when this tag is accepted. If Forge
+does not answer the Reverb lookup and this site has no previous Reverb answer,
+the site stays on the upstream port for that poll rather than sending the
+hostname to the overridden port. Other sites are still published.
 
 ---
 
@@ -184,7 +199,7 @@ Aliases: `traefik:lb-host`, `traefik:loadbalancer-host`
 
 ### `traefik:upstream-port`
 
-Override the default backend port (80) for all sites on this server. Can be overridden per-site with `traefik:port`.
+Override the default backend port (80) for all sites on this server. Can be overridden per-site with `traefik:port` for ports listed in `allowedSitePorts`.
 
 ```
 traefik:upstream-port=8080
@@ -254,7 +269,7 @@ Traefik must route both the apex and `www.` variant to the backend regardless of
 
 ### Reverb WebSocket
 
-If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain. The router points to **Nginx on port 80** — the same backend as the main site. Nginx handles the WebSocket proxy to the Reverb process internally using the location block Forge creates.
+If the Forge Reverb integration is enabled for a site (Sites → your site → Integrations → Reverb), the plugin auto-creates a separate router for the Reverb domain. The router points to **Nginx on the server's upstream port (80 by default)** — the same backend as the main site unless the site has an accepted `traefik:port` override, in which case the Reverb router gets its own service pointing at Nginx. If that lookup does not answer and the site has no previous Reverb answer, the site stays on the upstream port for that poll. Other sites are still published. Nginx handles the WebSocket proxy to the Reverb process internally using the location block Forge creates.
 
 The Reverb router has no HTTP→HTTPS redirect (WebSocket clients don't follow redirects). All other settings (TLS, middlewares, entry points) match the main site.
 
@@ -308,7 +323,13 @@ traefik:cert-resolver=letsencrypt-staging
 
 ### Override backend port for a Node.js app
 
-App running on port 3000:
+App running on port 3000. Allow the port in the plugin config:
+
+```yaml
+allowedSitePorts: [3000]
+```
+
+Then tag the site:
 
 ```
 traefik:port=3000

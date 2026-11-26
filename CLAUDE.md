@@ -97,9 +97,12 @@ fail the whole poll rather than skipping a server or a site. `sendConfiguration`
 sends nothing and Traefik keeps its last good configuration until a poll succeeds
 end to end.
 
-`FetchReverbIntegration` is the exception: losing it only means the Reverb domain is
-not singled out, and it still routes to the same Nginx backend, so it degrades with a
-log line instead of aborting.
+`FetchReverbIntegration` degrades with a log line. When the site has no accepted
+`traefik:port` override, or a previous Reverb answer is held, the domain is not
+singled out and it still routes to the same Nginx backend. When an accepted
+`traefik:port` differs from the server upstream port and no previous answer is
+held, that site stays on the upstream port for this poll so the unidentified
+WebSocket hostname is not sent to the app. The rest of the poll still finishes.
 
 When adding a new Forge call, decide which of those two categories it is in.
 
@@ -141,6 +144,14 @@ trigger "Too many attempts" across the whole token. If Forge starts returning 42
 check the *other* tools sharing the token before suspecting this plugin — grep for
 `api/v1` across the fleet. Confirmed with Forge support, September 2026.
 
+## Site tags do not choose where the load balancer dials
+
+Anyone who can tag one site in Forge controls that site's tags, so a site tag must
+not widen what the load balancer connects to. `traefik:port` only takes effect for a
+port in the operator's `allowedSitePorts` (or the server's own upstream port), and
+Reverb routers always stay on the server's Nginx port. Keep that rule when adding a
+site tag that touches the backend address.
+
 ## Local toolchain
 
 `go.mod` and both CI workflows pin **Go 1.22**. On a machine running a newer Go, both
@@ -180,7 +191,7 @@ The token is read only from `FORGE_TOKEN`. Do not add a flag for it: any local u
 can read a process's command line from `/proc/<pid>/cmdline`, but only the owner can
 read its environment.
 
-Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config.
+Use `--dump` to see raw Forge API responses when debugging struct mapping issues. Use `--json` to see the full generated Traefik config. Use `--compare path/to/file.toml` to diff against live static config. `--compare` only treats a generated rule as host coverage when it parses as `||`-joined ``Host(`name`)`` / wildcard `HostRegexp` clauses (`parseHostRule`); any other rule is REJECTED, its hosts are withheld from coverage, and the tool exits 1.
 
 Dump output files (`dump*.json`, `verify.out`) are gitignored.
 

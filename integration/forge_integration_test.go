@@ -9,6 +9,7 @@ import (
 
 	forge "github.com/Wicked-Sick-Ltd/traefik-laravel-forge"
 	"github.com/Wicked-Sick-Ltd/traefik-laravel-forge/mocks"
+	"github.com/traefik/genconf/dynamic"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -432,7 +433,9 @@ func TestGenerateConfiguration_SiteTagPortOverride(t *testing.T) {
 	noDomains(m, "s1", "site1")
 	noReverb(m, "s1", "site1")
 
-	cfg, err := newProvider(t, m).GenerateConfiguration()
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+
+	cfg, err := p.GenerateConfiguration()
 	require.NoError(t, err)
 
 	svc := cfg.HTTP.Services["forge-example.com-site1-service"]
@@ -658,8 +661,8 @@ func TestGenerateConfiguration_OneServerFailureDoesNotSilentlyDropAnother(t *tes
 	require.Error(t, err)
 }
 
-// A Reverb failure only costs us the ability to single out the Reverb domain, so
-// it degrades rather than aborting — the site keeps its routers.
+// A Reverb failure only costs us the ability to single out the Reverb domain when
+// every router still shares the Nginx port, so it degrades rather than aborting.
 func TestGenerateConfiguration_ReverbFetchFailureDegradesGracefully(t *testing.T) {
 	m := mocks.NewMockForgeClient(t)
 	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
@@ -671,6 +674,106 @@ func TestGenerateConfiguration_ReverbFetchFailureDegradesGracefully(t *testing.T
 
 	require.NoError(t, err)
 	assert.NotNil(t, cfg.HTTP.Routers["forge-site1-example.com"])
+}
+
+// An accepted traefik:port sends main routers to the app. Without a Reverb
+// answer there is no way to keep the WebSocket hostname off that port, so this
+// site stays on the upstream for the poll. Another site on the same server
+// still gets its override.
+func TestGenerateConfiguration_UnansweredReverbKeepsUpstreamPort(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{
+		makeSite("site1", "example.com", "traefik:port=3000"),
+		makeSite("site2", "other.example.com", "traefik:port=3000"),
+	}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
+		makeDomain("example.com", "primary"),
+		makeDomain("ws.example.com", "alias"),
+	}, nil)
+	m.EXPECT().FetchDomains("s1", "site2").Return([]forge.ForgeDomain{makeDomain("other.example.com", "primary")}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(nil, assert.AnError)
+	noReverb(m, "s1", "site2")
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	cfg, err := p.GenerateConfiguration()
+
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-example.com"))
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
+	assert.Equal(t, "http://10.0.0.1:3000", serviceURLFor(t, cfg, "forge-site2-other.example.com"))
+}
+
+// A rejected port tag leaves the site on the upstream port, so a missed Reverb
+// answer still shares that backend and the poll continues.
+func TestGenerateConfiguration_DisallowedPortDoesNotAbortOnReverbFailure(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com", "traefik:port=6379")}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{makeDomain("example.com", "primary")}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(nil, assert.AnError)
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	cfg, err := p.GenerateConfiguration()
+
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-example.com"))
+}
+
+// A previous Reverb answer is enough to keep the WebSocket hostname on Nginx
+// when the next lookup is refused.
+func TestGenerateConfiguration_CachedReverbHostSurvivesLaterFailure(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil).Times(2)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com", "traefik:port=3000")}, nil).Times(2)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
+		makeDomain("example.com", "primary"),
+		makeDomain("ws.example.com", "alias"),
+	}, nil).Times(2)
+	calls := 0
+	m.EXPECT().FetchReverbIntegration("s1", "site1").RunAndReturn(
+		func(string, string) (*forge.ForgeReverbIntegration, error) {
+			calls++
+			if calls == 1 {
+				return &forge.ForgeReverbIntegration{Enabled: true, Host: "ws.example.com", Port: 8081}, nil
+			}
+			return nil, assert.AnError
+		},
+	).Times(2)
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	if _, err := p.GenerateConfiguration(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := p.GenerateConfiguration()
+	require.NoError(t, err)
+	assert.Equal(t, "http://10.0.0.1:3000", serviceURLFor(t, cfg, "forge-site1-example.com"))
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
+}
+
+// With an accepted traefik:port and only a .on-forge.com main domain, no main
+// router is built, but the Reverb router must still be kept (#20) and must still
+// go to Nginx on the upstream port rather than the app port (#25).
+func TestGenerateConfiguration_ReverbOnlySiteWithPortOverrideUsesNginx(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "myapp.on-forge.com", "traefik:port=3000")}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
+		makeDomain("myapp.on-forge.com", "primary"),
+		makeDomain("ws.example.com", "alias"),
+	}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(&forge.ForgeReverbIntegration{
+		Enabled: true, Host: "ws.example.com", Port: 8081,
+	}, nil)
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+	cfg, err := p.GenerateConfiguration()
+	require.NoError(t, err)
+
+	assert.Nil(t, cfg.HTTP.Routers["forge-site1-myapp.on-forge.com"])
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
+	assert.Nil(t, cfg.HTTP.Services["forge-myapp.on-forge.com-site1-service"],
+		"no main router, so no app-port service")
 }
 
 // -- serverMappings --
@@ -718,6 +821,138 @@ func TestGenerateConfiguration_InvalidPortTagFallsBackToDefault(t *testing.T) {
 				"an unparseable port must not reach the backend URL")
 		})
 	}
+}
+
+// -- Site port allowlist --
+//
+// traefik:port is a site tag, so anyone who can tag one site could otherwise
+// point that site's public hostnames at any port on the server address the load
+// balancer dials. The tag only takes effect for ports the operator listed in
+// allowedSitePorts.
+
+// serviceURLFor returns the backend URL of the service a router points at.
+func serviceURLFor(t *testing.T, cfg *dynamic.Configuration, routerName string) string {
+	t.Helper()
+	router := cfg.HTTP.Routers[routerName]
+	require.NotNil(t, router, "router %q must exist", routerName)
+	svc := cfg.HTTP.Services[router.Service]
+	require.NotNil(t, svc, "service %q for router %q must exist", router.Service, routerName)
+	require.Len(t, svc.LoadBalancer.Servers, 1)
+	return svc.LoadBalancer.Servers[0].URL
+}
+
+func reverbSite(m *mocks.MockForgeClient, siteTags ...string) {
+	m.EXPECT().FetchServers().Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{makeSite("site1", "example.com", siteTags...)}, nil)
+	m.EXPECT().FetchDomains("s1", "site1").Return([]forge.ForgeDomain{
+		makeDomain("example.com", "primary"),
+		makeDomain("ws.example.com", "alias"),
+	}, nil)
+	m.EXPECT().FetchReverbIntegration("s1", "site1").Return(&forge.ForgeReverbIntegration{
+		Enabled: true,
+		Host:    "ws.example.com",
+		Port:    8081,
+	}, nil)
+}
+
+func TestGenerateConfiguration_SitePortTagIgnoredWithoutAllowlist(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	reverbSite(m, "traefik:port=6379", "traefik:aliases=extra.example.com")
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+	require.NoError(t, err)
+
+	for name := range cfg.HTTP.Routers {
+		assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, name),
+			"router %q must not follow a site port tag the operator never allowed", name)
+	}
+	assert.Len(t, cfg.HTTP.Routers, 3)
+}
+
+func TestGenerateConfiguration_SitePortTagNotOnAllowlistIgnored(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	reverbSite(m, "traefik:port=6379")
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000, 8080} })
+
+	cfg, err := p.GenerateConfiguration()
+	require.NoError(t, err)
+
+	for name := range cfg.HTTP.Routers {
+		assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, name),
+			"router %q must not follow a site port tag outside allowedSitePorts", name)
+	}
+}
+
+func TestGenerateConfiguration_SitePortTagSpellingsCannotBypassAllowlist(t *testing.T) {
+	cases := map[string][]string{
+		"sign prefix":             {"traefik:port=+6379"},
+		"leading zero":            {"traefik:port=06379"},
+		"padded key and value":    {"traefik: port = 6379 "},
+		"second tag overrides":    {"traefik:port=3000", "traefik:port=6379"},
+		"allowed then disallowed": {"traefik:port=6379", "traefik:port=3000", "traefik:port=22"},
+	}
+	for name, tags := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := mocks.NewMockForgeClient(t)
+			reverbSite(m, tags...)
+
+			p := newProviderWithConfig(t, m, func(c *forge.Config) { c.AllowedSitePorts = []int{3000} })
+
+			cfg, err := p.GenerateConfiguration()
+			require.NoError(t, err)
+
+			got := serviceURLFor(t, cfg, "forge-site1-example.com")
+			assert.Contains(t, []string{"http://10.0.0.1:80", "http://10.0.0.1:3000"}, got,
+				"tags %v must only ever select the server port or an allowed port", tags)
+			assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"))
+		})
+	}
+}
+
+func TestGenerateConfiguration_AllowedSitePortKeepsReverbOnNginx(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	reverbSite(m, "traefik:port=3000")
+
+	p := newProviderWithConfig(t, m, func(c *forge.Config) {
+		c.AllowedSitePorts = []int{3000}
+		c.DefaultCertResolver = testCertResolver
+		c.HTTPRedirect = true
+	})
+
+	cfg, err := p.GenerateConfiguration()
+	require.NoError(t, err)
+
+	assert.Equal(t, "http://10.0.0.1:3000", serviceURLFor(t, cfg, "forge-site1-example.com"))
+	assert.Equal(t, "http://10.0.0.1:3000", serviceURLFor(t, cfg, "forge-site1-example.com-http"))
+	assert.Equal(t, "http://10.0.0.1:80", serviceURLFor(t, cfg, "forge-site1-ws.example.com"),
+		"Reverb traffic must reach Nginx on the server port, not the site override")
+	assert.Nil(t, cfg.HTTP.Routers["forge-site1-ws.example.com-http"])
+}
+
+// The server's own upstream port is what the site would use anyway, so a site tag
+// naming it is accepted without an allowlist entry.
+func TestGenerateConfiguration_SitePortTagMatchingServerPortAccepted(t *testing.T) {
+	m := mocks.NewMockForgeClient(t)
+	m.EXPECT().FetchServers().
+		Return([]forge.ForgeServer{makeServer("s1", "app01", "10.0.0.1",
+			"traefik:upstream-host=10.0.0.1", "traefik:upstream-port=8080")}, nil)
+	m.EXPECT().FetchSites("s1").Return([]forge.ForgeSite{
+		makeSite("site1", "tagged.com", "traefik:port=8080"),
+		makeSite("site2", "untagged.com"),
+		makeSite("site3", "rejected.com", "traefik:port=80"),
+	}, nil)
+	for _, site := range []string{"site1", "site2", "site3"} {
+		noDomains(m, "s1", site)
+		noReverb(m, "s1", site)
+	}
+
+	cfg, err := newProvider(t, m).GenerateConfiguration()
+	require.NoError(t, err)
+
+	assert.Equal(t, "http://10.0.0.1:8080", serviceURLFor(t, cfg, "forge-site1-tagged.com"))
+	assert.Equal(t, "http://10.0.0.1:8080", serviceURLFor(t, cfg, "forge-site2-untagged.com"))
+	assert.Equal(t, "http://10.0.0.1:8080", serviceURLFor(t, cfg, "forge-site3-rejected.com"))
 }
 
 func TestGenerateConfiguration_InvalidUpstreamPortTagFallsBackToDefault(t *testing.T) {
