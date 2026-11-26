@@ -259,6 +259,29 @@ func TestExtractHostsFromConfig(t *testing.T) {
 	}
 }
 
+func TestParsePortList(t *testing.T) {
+	tests := []struct {
+		value   string
+		want    []int
+		wantErr bool
+	}{
+		{value: "", want: nil},
+		{value: "3000", want: []int{3000}},
+		{value: " 3000, 8080 ,", want: []int{3000, 8080}},
+		{value: "3000,abc", wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := parsePortList(tt.value)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parsePortList(%q) error = %v, wantErr %v", tt.value, err, tt.wantErr)
+			continue
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("parsePortList(%q) = %v, want %v", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestUnexpectedArgsMessage(t *testing.T) {
 	secret := "forge-token-not-on-argv-9f3c"
 	if got := unexpectedArgsMessage(0); got != "" {
