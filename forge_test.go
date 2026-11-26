@@ -1404,3 +1404,55 @@ func (stubClient) FetchDomains(string, string) ([]ForgeDomain, error) { return n
 func (stubClient) FetchReverbIntegration(string, string) (*ForgeReverbIntegration, error) {
 	return nil, nil
 }
+
+// A site with no domain records falls back to its site name, but that
+// synthesized router is not a Forge record: it must not take the hostname
+// from a higher-id site that really holds the record.
+func TestSiteNameFallbackDoesNotTakeDomainRecord(t *testing.T) {
+	server := appServer()
+	fallback := namedSite("1", "shop.example.com", nil)
+	owner := namedSite("2", "shop.example.com", nil)
+	domains := map[string][]ForgeDomain{}
+	domains["2"] = append(domains["2"], enabledDomain("shop.example.com"))
+	p := routingProvider(t, newCatalog(server, []ForgeSite{fallback, owner}, domains, nil))
+	p.defaultCertResolver = testResolver
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-2-shop.example.com"] == nil {
+		t.Fatal("domain record lost its hostname to a lower-id site-name fallback")
+	}
+	if cfg.HTTP.Routers["forge-1-shop.example.com"] != nil {
+		t.Fatal("site-name fallback published a hostname held by another site's domain record")
+	}
+}
+
+// A record's www redirect adds a synthesized www. host to its router. That
+// host is not the record's own name, so it must not beat a higher-id site
+// that holds a real www. record.
+func TestWWWVariantDoesNotTakeAnotherSitesWWWRecord(t *testing.T) {
+	server := appServer()
+	apex := enabledDomain("example.com")
+	apex.Attributes.WWWRedirectType = "to-www"
+	domains := map[string][]ForgeDomain{}
+	domains["1"] = append(domains["1"], apex)
+	domains["2"] = append(domains["2"], enabledDomain("www.example.com"))
+	sites := []ForgeSite{namedSite("1", "example.com", nil), namedSite("2", "www.example.com", nil)}
+	p := routingProvider(t, newCatalog(server, sites, domains, nil))
+	p.defaultCertResolver = testResolver
+	cfg, err := p.GenerateConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Routers["forge-2-www.example.com"] == nil {
+		t.Fatal("www. record lost its hostname to another site's synthesized www variant")
+	}
+	apexRouter := cfg.HTTP.Routers["forge-1-example.com"]
+	if apexRouter == nil {
+		t.Fatal("apex router was dropped")
+	}
+	if strings.Contains(apexRouter.Rule, "www.example.com") {
+		t.Fatalf("apex router still publishes the www host: %s", apexRouter.Rule)
+	}
+}

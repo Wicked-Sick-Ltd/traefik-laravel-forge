@@ -172,7 +172,7 @@ type Provider struct {
 	// recordRouters names routers built from a Forge domain or Reverb record
 	// during this poll. Alias routers are absent, so a tag cannot outrank the
 	// site that holds the hostname.
-	recordRouters map[string]struct{}
+	recordRouters map[string]map[string]struct{}
 
 	mu     sync.Mutex
 	cancel func()
@@ -390,7 +390,7 @@ func (p *Provider) generateConfiguration() (*dynamic.Configuration, error) {
 	pluginLog.Printf("Fetched %d servers from Forge", len(servers))
 
 	p.beginPoll()
-	p.recordRouters = map[string]struct{}{}
+	p.recordRouters = map[string]map[string]struct{}{}
 	for _, server := range servers {
 		if err := p.processServer(server, configuration, redirectMiddlewareName); err != nil {
 			return nil, err
@@ -617,7 +617,9 @@ func (p *Provider) processSite(
 	// One router per Forge domain record.
 	routersCreated := 0
 	for _, d := range mainDomains {
-		if p.createDomainRouter(site.ID, d, serviceName, tags, configuration, redirectMiddlewareName) {
+		// The synthesized site-name domain is not a Forge record: it must not
+		// outrank a real record another site holds for that hostname.
+		if p.createDomainRouter(site.ID, d, serviceName, tags, configuration, redirectMiddlewareName, hadMainRecords) {
 			routersCreated++
 		}
 	}
@@ -652,7 +654,7 @@ func (p *Provider) processSite(
 	noRedirectTags.HTTPRedirect = false
 	reverbRouters := 0
 	for _, rd := range reverbDomains {
-		if p.createDomainRouter(site.ID, rd, reverbServiceName, noRedirectTags, configuration, redirectMiddlewareName) {
+		if p.createDomainRouter(site.ID, rd, reverbServiceName, noRedirectTags, configuration, redirectMiddlewareName, true) {
 			reverbRouters++
 			pluginLog.Printf("Created Reverb router for site %q domain=%q -> %q (via Nginx)",
 				site.Attributes.Name, rd.Attributes.Name, reverbBackendURL)
@@ -703,7 +705,9 @@ func withoutForgeDefaultDomains(domains []ForgeDomain) []ForgeDomain {
 
 // createDomainRouter creates a Traefik router for a single Forge domain record,
 // incorporating any www redirect and wildcard subdomain variants. Returns true if
-// a router was created (false if the domain was filtered out).
+// a router was created (false if the domain was filtered out). record is true
+// when domain is a real Forge domain or Reverb record; only that record's own
+// hostname is noted as a record claim, not a synthesized www. variant.
 func (p *Provider) createDomainRouter(
 	siteID string,
 	domain ForgeDomain,
@@ -711,6 +715,7 @@ func (p *Provider) createDomainRouter(
 	tags siteTagConfig,
 	configuration *dynamic.Configuration,
 	redirectMiddlewareName string,
+	record bool,
 ) bool {
 	name := domain.Attributes.Name
 
@@ -728,7 +733,9 @@ func (p *Provider) createDomainRouter(
 		routerName := fmt.Sprintf("forge-%s-%s", siteID, name)
 		createRouter(routerName, fmt.Sprintf("Host(`%s`)", name), serviceName, noTLSTags,
 			false, "", domainPriority(name), configuration, redirectMiddlewareName)
-		p.noteRecordRouter(routerName)
+		if record {
+			p.noteRecordRouter(routerName, name)
+		}
 		return true
 	}
 
@@ -746,15 +753,21 @@ func (p *Provider) createDomainRouter(
 	routerName := fmt.Sprintf("forge-%s-%s", siteID, name)
 	createRouter(routerName, buildHostRule(hosts, wildcardHosts), serviceName, tags,
 		tags.EnableTLS, tags.CertResolver, domainPriority(name), configuration, redirectMiddlewareName)
-	p.noteRecordRouter(routerName)
+	if record {
+		p.noteRecordRouter(routerName, name)
+	}
 	return true
 }
 
-func (p *Provider) noteRecordRouter(name string) {
+// noteRecordRouter records that router publishes host from a Forge record.
+func (p *Provider) noteRecordRouter(router, host string) {
 	if p.recordRouters == nil {
-		p.recordRouters = map[string]struct{}{}
+		p.recordRouters = map[string]map[string]struct{}{}
 	}
-	p.recordRouters[name] = struct{}{}
+	if p.recordRouters[router] == nil {
+		p.recordRouters[router] = map[string]struct{}{}
+	}
+	p.recordRouters[router][claimHost(host)] = struct{}{}
 }
 
 // createRouter writes a router (and optional HTTP redirect router) into configuration.
@@ -1098,7 +1111,9 @@ type hostClaim struct {
 // per entry point. A site's own second router is not a contest. Only a rule
 // part that is exactly Host(`name`) counts. Hostnames are compared
 // case-insensitively, with one trailing dot removed.
-func dropContestedHosts(configuration *dynamic.Configuration, records map[string]struct{}) {
+// records maps a router name to the hostnames it holds a Forge record for; any
+// other host on that router (a www. variant, an alias) is not a record claim.
+func dropContestedHosts(configuration *dynamic.Configuration, records map[string]map[string]struct{}) {
 	if configuration == nil || configuration.HTTP == nil {
 		return
 	}
@@ -1108,7 +1123,6 @@ func dropContestedHosts(configuration *dynamic.Configuration, records map[string
 			continue
 		}
 		siteID := siteIDFromRouter(name, router.Rule)
-		_, isRecord := records[name]
 		eps := append([]string{}, router.EntryPoints...)
 		if httpRouter := configuration.HTTP.Routers[name+"-http"]; httpRouter != nil {
 			for _, ep := range httpRouter.EntryPoints {
@@ -1122,7 +1136,7 @@ func dropContestedHosts(configuration *dynamic.Configuration, records map[string
 				siteID: siteID,
 				router: name,
 				eps:    eps,
-				record: isRecord,
+				record: isRecordHost(records, name, host),
 			})
 		}
 	}
@@ -1198,6 +1212,11 @@ func dropContestedHosts(configuration *dynamic.Configuration, records map[string
 		router.Rule = rule
 	}
 	trimLostEntryPoints(configuration, split)
+}
+
+func isRecordHost(records map[string]map[string]struct{}, router, host string) bool {
+	_, ok := records[router][claimHost(host)]
+	return ok
 }
 
 func markHostDrop(drop map[string]map[string]bool, router, host string) {
